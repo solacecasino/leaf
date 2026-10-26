@@ -1,0 +1,31 @@
+[package]
+name = "leaf"
+version = "0.1.0"
+edition = "2024"
+description = "A bare, instant comic and manga reader that reopens where you left off."
+license = "MIT"
+
+[dependencies]
+# The window and input (winit); the pixels are drawn by the CPU and handed to
+# the window by softbuffer, so no graphics driver is loaded.
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
+softbuffer = { version = "0.4.8", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
+# Page decoding. Only the formats comics actually use are compiled in.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+rfd = "0.17.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+
+# Decoding in a debug build is painfully slow; optimize dependencies anyway.
+[profile.dev.package."*"]
+opt-level = 3
