@@ -113,6 +113,7 @@ jobs:
           Copy-Item README.md, LICENSE stage\
           Compress-Archive -Path stage\* -DestinationPath "dist\Leaf-$v-windows-x64.zip"
       - name: Check that it opens a book, and take screenshots
+        timeout-minutes: 5
         shell: pwsh
         run: |
           cargo run --quiet --release --example sample
@@ -161,7 +162,7 @@ jobs:
       - name: Dependencies (libarchive is found at run time, for RAR, 7-Zip and TAR)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libarchive13 libarchive-tools rar xvfb xdotool imagemagick openbox
+          sudo apt-get install -y libarchive13 libarchive-tools rar libxkbcommon-x11-0 xvfb xdotool imagemagick openbox
       - name: Test
         env:
           LEAF_REQUIRE_RAR: "1"
@@ -182,6 +183,7 @@ jobs:
           ./target/release/leaf --version
           for f in test-books/*.cb*; do ./target/release/leaf --check "$f"; done
       - name: Screenshots
+        timeout-minutes: 3
         run: |
           mkdir -p shots cfg
           export LEAF_CONFIG_DIR=$PWD/cfg DISPLAY=:99
@@ -191,7 +193,7 @@ jobs:
           sleep 1
           ./target/release/leaf "samples/Demo Webtoon.cbz" &
           sleep 6
-          W=$(xdotool search --sync --name Leaf | head -1)
+          W=$(timeout 20 xdotool search --sync --name Leaf | head -1)
           xdotool windowactivate --sync "$W" || true
           import -window root shots/1-webtoon.png
           xdotool key space; sleep 1

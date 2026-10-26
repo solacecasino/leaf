@@ -18,7 +18,9 @@ Download from [Releases](https://github.com/solacecasino/leaf/releases):
   **More info → Run anyway**.
 - **Linux** (x86-64): `leaf-<version>-linux-x64.tar.gz`. Unpack it and run
   `leaf`. RAR, 7-Zip and TAR comics use the system's libarchive (the
-  `libarchive13` package, already there on most desktops).
+  `libarchive13` package, already there on most desktops). The window
+  needs `libxkbcommon` (and `libxkbcommon-x11` on X11), which every
+  desktop has.
 
 The Mac version reads the most: PDFs and text books use macOS's own
 renderers, so on Windows and Linux they need an adapter for now.
