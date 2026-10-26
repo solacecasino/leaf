@@ -1,20 +1,35 @@
 //! EPUBs: the pages in the book's own reading order (its spine), not file
 //! name order. An EPUB of pictures (most manga and comic EPUBs) becomes its
-//! images; one of writing becomes its text, laid out by Core Text.
+//! images; one of writing becomes its text, laid out by Core Text, with its
+//! pictures on pages of their own where they appear.
 
+use crate::book::Block;
 use std::collections::HashMap;
 use std::io::Read;
+
+/// Pictures smaller than this in a book of writing are ornaments (a
+/// flourish, a dingbat), not illustrations, and get no page.
+const MIN_PICTURE: u64 = 16 * 1024;
 
 pub enum Content {
     /// Image entries in reading order.
     Images(Vec<String>),
-    /// The book's text, chapters separated by blank lines.
-    Text(String),
+    /// The book's writing and pictures in reading order.
+    Text(Vec<Block>),
+}
+
+/// What an EPUB says about itself beyond its pages.
+#[derive(Default)]
+pub struct Meta {
+    /// The spine reads right to left (`page-progression-direction="rtl"`):
+    /// a manga.
+    pub rtl: bool,
 }
 
 /// What's in an EPUB. `read` returns a zip entry's bytes; `exists` whether
 /// an entry exists.
-pub fn read<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Result<Content, String> {
+pub fn read<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Result<(Content, Meta), String> {
+    let sizes: HashMap<String, u64> = (0..zip.len()).filter_map(|i| zip.by_index_raw(i).ok().and_then(|e| Some((e.name().ok()?.into_owned(), e.size())))).collect();
     let mut entry = |name: &str| -> Option<String> {
         let mut f = zip.by_name(name).ok()?;
         if f.size() > 64 << 20 {
@@ -34,39 +49,91 @@ pub fn read<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Result<Con
         .filter_map(|t| Some((attr(t, "id")?, join(&base, &attr(t, "href")?))))
         .collect();
     let spine: Vec<String> = tags(&opf, "itemref").iter().filter_map(|t| manifest.get(&attr(t, "idref")?).cloned()).collect();
+    let rtl = tags(&opf, "spine").iter().any(|t| attr(t, "page-progression-direction").is_some_and(|d| d.eq_ignore_ascii_case("rtl")));
 
     let mut images = Vec::new();
-    let mut text = String::new();
+    let mut blocks = Vec::new();
     for chapter in &spine {
         if crate::book::is_image_name(chapter) {
             images.push(chapter.clone());
+            blocks.push(Block::Picture(chapter.clone()));
             continue;
         }
         let Some(html) = entry(chapter) else { continue };
-        let here = dir_of(chapter);
-        for t in tags(&html, "img").iter().chain(tags(&html, "image").iter()) {
-            let src = attr(t, "src").or_else(|| attr(t, "xlink:href")).or_else(|| attr(t, "href"));
-            if let Some(src) = src {
-                images.push(join(&here, &src));
+        for block in chapter_blocks(&html, &dir_of(chapter)) {
+            if let Block::Picture(p) = &block {
+                images.push(p.clone());
             }
-        }
-        let words = plain_text(&html);
-        if !words.trim().is_empty() {
-            text.push_str(words.trim());
-            text.push_str("\n\n");
+            blocks.push(block);
         }
     }
     images.dedup();
+    let meta = Meta { rtl };
 
     // A picture book has a picture per chapter and little writing.
-    let letters = text.chars().filter(|c| !c.is_whitespace()).count();
+    let letters: usize = blocks.iter().map(|b| if let Block::Words(w) = b { w.chars().filter(|c| !c.is_whitespace()).count() } else { 0 }).sum();
     if !images.is_empty() && letters < 80 * spine.len().max(1) {
-        Ok(Content::Images(images))
-    } else if letters > 0 {
-        Ok(Content::Text(text))
-    } else {
-        Err("this EPUB has no pages Leaf can show".into())
+        return Ok((Content::Images(images), meta));
     }
+    if letters == 0 {
+        return Err("this EPUB has no pages Leaf can show".into());
+    }
+    // Writing: neighbouring runs joined into one, and only real pictures kept.
+    let mut out: Vec<Block> = Vec::new();
+    for block in blocks {
+        match (block, out.last_mut()) {
+            (Block::Words(w), Some(Block::Words(prev))) => {
+                prev.push_str("\n\n");
+                prev.push_str(&w);
+            }
+            (Block::Picture(p), _) if sizes.get(&p).is_none_or(|&s| s < MIN_PICTURE) => {}
+            (Block::Picture(p), Some(Block::Picture(prev))) if *prev == p => {}
+            (block, _) => out.push(block),
+        }
+    }
+    Ok((Content::Text(out), meta))
+}
+
+/// A chapter's writing, split where its pictures go.
+fn chapter_blocks(html: &str, here: &str) -> Vec<Block> {
+    let mut out = Vec::new();
+    let lower = html.to_ascii_lowercase();
+    let body = lower.find("<body").unwrap_or(0);
+    let mut from = body;
+    // Each picture tag ends the writing before it.
+    let mut pictures: Vec<(usize, usize, String)> = Vec::new();
+    for name in ["<img", "<image"] {
+        let mut at = body;
+        while let Some(i) = lower[at..].find(name) {
+            let start = at + i;
+            let end = html[start..].find('>').map_or(html.len(), |e| start + e + 1);
+            at = end;
+            if !lower[start + name.len()..].starts_with(|c: char| c.is_whitespace() || c == '/' || c == '>') {
+                continue;
+            }
+            let t = &html[start + name.len()..end.saturating_sub(1).max(start + name.len())];
+            if let Some(src) = attr(t, "src").or_else(|| attr(t, "xlink:href")).or_else(|| attr(t, "href")) {
+                pictures.push((start, end, join(here, &src)));
+            }
+        }
+    }
+    pictures.sort_by_key(|p| p.0);
+    let push_words = |part: &str, out: &mut Vec<Block>| {
+        let words = plain_text(part);
+        if !words.trim().is_empty() {
+            out.push(Block::Words(words.trim().to_owned()));
+        }
+    };
+    for (start, end, src) in pictures {
+        if start < from {
+            continue;
+        }
+        push_words(&html[from..start], &mut out);
+        out.push(Block::Picture(src));
+        from = end;
+    }
+    push_words(&html[from..], &mut out);
+    out
 }
 
 /// Every `<name ...>` tag's inside, from a little XML or HTML.
@@ -152,7 +219,8 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// The readable text of an XHTML chapter: paragraphs on their own lines.
+/// The readable text of (part of) an XHTML chapter: paragraphs on their
+/// own lines.
 pub fn plain_text(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let body = lower.find("<body").unwrap_or(0);
@@ -263,8 +331,11 @@ mod tests {
             ("OEBPS/text/b.xhtml", r#"<html><body><svg><image xlink:href="../images/p2.jpg"/></svg></body></html>"#),
         ]);
         match read(&mut z).unwrap() {
-            Content::Images(pages) => assert_eq!(pages, ["OEBPS/images/page 10.jpg", "OEBPS/images/p2.jpg"]),
-            Content::Text(_) => panic!("read as text"),
+            (Content::Images(pages), meta) => {
+                assert_eq!(pages, ["OEBPS/images/page 10.jpg", "OEBPS/images/p2.jpg"]);
+                assert!(!meta.rtl);
+            }
+            (Content::Text(_), _) => panic!("read as text"),
         }
     }
 
@@ -276,14 +347,32 @@ mod tests {
             "It was a dark and stormy night. ".repeat(10)
         );
         let mut z = epub(&[CONTAINER, ("OEBPS/content.opf", opf), ("OEBPS/one.xhtml", &chapter)]);
-        match read(&mut z).unwrap() {
-            Content::Text(t) => {
+        match read(&mut z).unwrap().0 {
+            Content::Text(blocks) => {
+                let [Block::Words(t)] = blocks.as_slice() else { panic!("one run of writing") };
                 assert!(t.starts_with("Chapter One\nIt was a dark"), "{t}");
                 assert!(t.contains("Tom & Jerry\u{2019}s."));
                 assert!(!t.contains("p {"));
             }
             Content::Images(_) => panic!("read as pictures"),
         }
+    }
+
+    #[test]
+    fn novels_keep_their_pictures_and_manga_say_so() {
+        let opf = r#"<package><manifest><item id="c1" href="one.xhtml"/><item id="c2" href="two.xhtml"/></manifest>
+            <spine page-progression-direction="rtl"><itemref idref="c1"/><itemref idref="c2"/></spine></package>"#;
+        let words = "It was a dark and stormy night. ".repeat(10);
+        let one = format!("<html><body><p>{words}</p><img src='map.png'/><p>After the map.</p><img src='dot.png'/></body></html>");
+        let two = format!("<html><body><p>{words}</p></body></html>");
+        let map = "x".repeat(40_000);
+        let mut z = epub(&[CONTAINER, ("OEBPS/content.opf", opf), ("OEBPS/one.xhtml", &one), ("OEBPS/two.xhtml", &two), ("OEBPS/map.png", &map), ("OEBPS/dot.png", "tiny")]);
+        let (content, meta) = read(&mut z).unwrap();
+        assert!(meta.rtl);
+        let Content::Text(blocks) = content else { panic!("read as pictures") };
+        // The map gets a page where it appears; the tiny ornament doesn't.
+        let kinds: Vec<String> = blocks.iter().map(|b| match b { Block::Words(w) => format!("words:{}", &w[..5]), Block::Picture(p) => p.clone() }).collect();
+        assert_eq!(kinds, ["words:It wa", "OEBPS/map.png", "words:After"]);
     }
 
     #[test]

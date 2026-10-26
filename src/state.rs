@@ -86,8 +86,13 @@ fn home() -> PathBuf {
         .unwrap_or_default()
 }
 
-/// The one folder that holds everything Leaf keeps. Copy it to move your setup.
+/// The one folder that holds everything Leaf keeps. Copy it to move your
+/// setup. `LEAF_CONFIG_DIR` points Leaf at another one (for testing, or a
+/// second setup).
 pub fn dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("LEAF_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
+    }
     #[cfg(target_os = "macos")]
     return home().join("Library/Application Support/Leaf");
     #[cfg(windows)]

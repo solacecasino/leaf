@@ -117,7 +117,17 @@ pub fn memory_use() -> Option<(u64, u64)> {
         let info = unsafe { info.assume_init() };
         ok.then_some((info.ri_phys_footprint, info.ri_lifetime_max_phys_footprint))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        // VmRSS and VmHWM, in kB.
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let kb = |key: &str| -> Option<u64> {
+            let line = status.lines().find(|l| l.starts_with(key))?;
+            line.split_whitespace().nth(1)?.parse::<u64>().ok().map(|k| k * 1024)
+        };
+        Some((kb("VmRSS:")?, kb("VmHWM:")?))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     None
 }
 
@@ -128,9 +138,18 @@ pub fn copy(text: &str) {
     let program = "pbcopy";
     #[cfg(windows)]
     let program = "clip";
+    // Wayland's clipboard tool, else X11's.
     #[cfg(all(unix, not(target_os = "macos")))]
-    let program = "xclip";
-    let child = Command::new(program).stdin(std::process::Stdio::piped()).spawn();
+    let program = if std::env::var_os("WAYLAND_DISPLAY").is_some() { "wl-copy" } else { "xclip" };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = Command::new(program);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if program == "xclip" {
+        command.args(["-selection", "clipboard"]);
+    }
+    #[cfg(any(target_os = "macos", windows))]
+    let mut command = Command::new(program);
+    let child = command.stdin(std::process::Stdio::piped()).spawn();
     if let Ok(mut child) = child {
         if let Some(stdin) = child.stdin.as_mut() {
             let _ = stdin.write_all(text.as_bytes());
@@ -139,10 +158,17 @@ pub fn copy(text: &str) {
     }
 }
 
+/// Where a removed adapter goes, as the message says it.
+pub const TRASH: &str = if cfg!(windows) { "Leaf's Removed folder" } else { "the Trash" };
+
 /// Moves a folder to the Trash, where it can still be recovered, renaming
-/// it if the name is taken there.
+/// it if the name is taken there. On Windows, where the Recycle Bin can't
+/// be reached without more code than it's worth, it goes to a "Removed"
+/// folder in Leaf's config folder instead.
 pub fn move_to_trash(dir: &Path) -> Result<(), String> {
-    let trash = if cfg!(target_os = "macos") {
+    let trash = if cfg!(windows) {
+        crate::state::dir().join("Removed")
+    } else if cfg!(target_os = "macos") {
         std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join(".Trash")
     } else {
         std::env::var_os("XDG_DATA_HOME")
@@ -163,7 +189,7 @@ fn move_into(dir: &Path, trash: &Path) -> Result<(), String> {
         to = trash.join(format!("{name} {n}"));
         n += 1;
     }
-    std::fs::rename(dir, &to).map_err(|e| format!("Couldn't move {name} to the Trash: {e}"))
+    std::fs::rename(dir, &to).map_err(|e| format!("Couldn't move {name} to {TRASH}: {e}"))
 }
 
 #[cfg(test)]
@@ -172,13 +198,13 @@ mod tests {
 
     #[test]
     fn hides_the_user_name() {
-        let home = std::env::var("HOME").unwrap();
+        let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap();
         assert_eq!(hide_home(&format!("Config folder: {home}/Library/Leaf")), "Config folder: ~/Library/Leaf");
     }
 
     #[test]
     fn reads_its_own_memory() {
-        if cfg!(target_os = "macos") {
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
             // The most-so-far figure is updated lazily, so it can trail a moment.
             let (now, peak) = memory_use().unwrap();
             assert!(now > 0 && peak > 0);

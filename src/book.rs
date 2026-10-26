@@ -11,6 +11,7 @@ use zip::ZipArchive;
 
 use crate::adapters::{Link, OPEN_TIMEOUT};
 use crate::loader::Target;
+use crate::state::Mode;
 use image::RgbImage;
 use serde_json::json;
 
@@ -31,16 +32,26 @@ pub struct Book {
     /// What gets remembered: the folder or the file.
     pub path: PathBuf,
     pub name: String,
-    pub pages: Vec<String>,
+    /// Each page's name in the archive or folder; empty for PDF and text
+    /// books, whose pages are numbered.
+    names: Vec<String>,
     /// What the file itself says about how to read it.
     pub hints: Hints,
     kind: Kind,
 }
 
+/// A piece of a book of writing: some words, or a picture (an entry in the
+/// EPUB) that gets a page of its own.
+pub enum Block {
+    Words(String),
+    Picture(String),
+}
+
 #[derive(Default, Clone, Copy)]
 pub struct Hints {
-    /// ComicInfo.xml says it's manga.
-    pub manga: bool,
+    /// What the book's own information says it is: ComicInfo.xml's Manga,
+    /// language, publisher or format, or an EPUB that reads right to left.
+    pub mode: Option<Mode>,
     /// Writing, not pictures: one page at a time, nothing to detect.
     pub text: bool,
     /// A PDF, which can be a comic, a manga scan or a document, so its
@@ -51,12 +62,13 @@ pub struct Hints {
 enum Kind {
     Folder(Vec<PathBuf>),
     Zip(Mutex<ZipArchive<BufReader<File>>>),
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     Archive(Mutex<crate::archive::Book>),
     #[cfg(target_os = "macos")]
     Pdf(crate::native::Pdf),
+    /// Writing laid out into pages, and the EPUB its pictures come from.
     #[cfg(target_os = "macos")]
-    Text(crate::native::Text),
+    Text(crate::native::Text, Option<Mutex<ZipArchive<BufReader<File>>>>),
     /// A format an adapter reads for Leaf (`opens` in adapter.toml).
     Adapter(Arc<Link>),
 }
@@ -159,8 +171,59 @@ fn mac_only(what: &str) -> String {
 }
 
 impl Book {
-    fn new(path: &Path, pages: Vec<String>, kind: Kind) -> Book {
-        Book { path: path.to_path_buf(), name: stem(path), pages, hints: Hints::default(), kind }
+    fn new(path: &Path, names: Vec<String>, kind: Kind) -> Book {
+        Book { path: path.to_path_buf(), name: stem(path), names, hints: Hints::default(), kind }
+    }
+
+    /// The pages known so far. Every book has all of them from the start,
+    /// except a text book, which is laid out as it's read.
+    pub fn len(&self) -> usize {
+        match &self.kind {
+            #[cfg(target_os = "macos")]
+            Kind::Pdf(pdf) => pdf.pages(),
+            #[cfg(target_os = "macos")]
+            Kind::Text(text, _) => text.pages(),
+            _ => self.names.len(),
+        }
+    }
+
+    /// Whether every page is known.
+    pub fn complete(&self) -> bool {
+        match &self.kind {
+            #[cfg(target_os = "macos")]
+            Kind::Text(text, _) => text.complete(),
+            _ => true,
+        }
+    }
+
+    /// The book's length: exact, or a guess while a text book is still
+    /// being laid out.
+    pub fn estimate(&self) -> usize {
+        match &self.kind {
+            #[cfg(target_os = "macos")]
+            Kind::Text(text, _) => text.estimate(),
+            _ => self.len(),
+        }
+    }
+
+    /// Lays out a text book until `page` exists (or it ends).
+    pub fn ensure(&self, page: usize) {
+        #[cfg(target_os = "macos")]
+        if let Kind::Text(text, _) = &self.kind {
+            let _ = text.ensure(page);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = page;
+    }
+
+    /// Lays out a few more pages of a text book, in the background.
+    pub fn grow(&self) {
+        self.ensure(self.len() + 15);
+    }
+
+    /// A page's name, for messages.
+    pub fn page_name(&self, page: usize) -> String {
+        self.names.get(page).cloned().unwrap_or_else(|| format!("page {}", page + 1))
     }
 
     /// Opens a folder, an archive, a PDF, a text book, or a single image
@@ -229,7 +292,7 @@ impl Book {
         }
         let (pages, paths) = files.into_iter().unzip();
         let mut book = Book::new(dir, pages, Kind::Folder(paths));
-        book.hints.manga = fs::read_to_string(dir.join("ComicInfo.xml")).is_ok_and(|x| says_manga(&x));
+        book.hints.mode = fs::read_to_string(dir.join("ComicInfo.xml")).ok().and_then(|x| comic_info_mode(&x));
         Ok(book)
     }
 
@@ -244,14 +307,17 @@ impl Book {
             return Self::document(path);
         }
         if has("META-INF/container.xml") {
-            match crate::epub::read(&mut archive)? {
+            let (content, meta) = crate::epub::read(&mut archive)?;
+            match content {
                 crate::epub::Content::Images(pages) => {
                     let pages: Vec<String> = pages.into_iter().filter(|p| names.contains(p)).collect();
                     if !pages.is_empty() {
-                        return Ok(Book::new(path, pages, Kind::Zip(Mutex::new(archive))));
+                        let mut book = Book::new(path, pages, Kind::Zip(Mutex::new(archive)));
+                        book.hints.mode = meta.rtl.then_some(Mode::Manga);
+                        return Ok(book);
                     }
                 }
-                crate::epub::Content::Text(text) => return Self::text(path, &text),
+                crate::epub::Content::Text(blocks) => return Self::text(path, blocks, Some(archive)),
             }
         }
 
@@ -261,24 +327,24 @@ impl Book {
             return Err(format!("{} has no page images", stem(path)));
         }
         let info = names.iter().find(|n| n.rsplit('/').next().is_some_and(|f| f.eq_ignore_ascii_case("ComicInfo.xml"))).cloned();
-        let manga = info.and_then(|n| {
+        let mode = info.and_then(|n| {
             let mut s = String::new();
             archive.by_name(&n).ok()?.take(1 << 20).read_to_string(&mut s).ok()?;
-            Some(says_manga(&s))
+            comic_info_mode(&s)
         });
         let mut book = Book::new(path, pages, Kind::Zip(Mutex::new(archive)));
-        book.hints.manga = manga.unwrap_or(false);
+        book.hints.mode = mode;
         Ok(book)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn archive(path: &Path) -> Result<Book, String> {
         let listing = crate::archive::Book::open(path, is_image_name)?;
         if listing.pages.is_empty() {
             return Err(format!("{} has no page images", stem(path)));
         }
         let mut book = Book::new(path, listing.pages, Kind::Archive(Mutex::new(listing.book)));
-        book.hints.manga = listing.comic_info.is_some_and(|x| says_manga(&x));
+        book.hints.mode = listing.comic_info.and_then(|x| comic_info_mode(&x));
         Ok(book)
     }
 
@@ -288,8 +354,7 @@ impl Book {
         if pdf.pages() == 0 {
             return Err(format!("{} has no pages", stem(path)));
         }
-        let pages = (1..=pdf.pages()).map(|i| format!("page {i}")).collect();
-        let mut book = Book::new(path, pages, Kind::Pdf(pdf));
+        let mut book = Book::new(path, Vec::new(), Kind::Pdf(pdf));
         book.hints.pdf = true;
         Ok(book)
     }
@@ -299,28 +364,27 @@ impl Book {
             return Err(format!("{} is too big to read as text", stem(path)));
         }
         let text = decode_text(&fs::read(path).map_err(|e| e.to_string())?);
-        Self::text(path, &text)
+        Self::text(path, vec![Block::Words(text)], None)
     }
 
     #[cfg(target_os = "macos")]
-    fn text(path: &Path, text: &str) -> Result<Book, String> {
-        Self::from_text(path, crate::native::Text::from_plain(text)?)
+    fn text(path: &Path, blocks: Vec<Block>, pictures: Option<ZipArchive<BufReader<File>>>) -> Result<Book, String> {
+        Ok(Self::from_text(path, crate::native::Text::from_blocks(blocks)?, pictures))
     }
 
     #[cfg(target_os = "macos")]
     fn document(path: &Path) -> Result<Book, String> {
-        Self::from_text(path, crate::native::Text::from_document(path)?)
+        Ok(Self::from_text(path, crate::native::Text::from_document(path)?, None))
     }
 
     #[cfg(target_os = "macos")]
-    fn from_text(path: &Path, text: crate::native::Text) -> Result<Book, String> {
-        let pages = (1..=text.pages()).map(|i| format!("page {i}")).collect();
-        let mut book = Book::new(path, pages, Kind::Text(text));
+    fn from_text(path: &Path, text: crate::native::Text, pictures: Option<ZipArchive<BufReader<File>>>) -> Book {
+        let mut book = Book::new(path, Vec::new(), Kind::Text(text, pictures.map(Mutex::new)));
         book.hints.text = true;
-        Ok(book)
+        book
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     fn archive(_: &Path) -> Result<Book, String> {
         Err(mac_only("RAR, 7-Zip and TAR comics"))
     }
@@ -331,7 +395,7 @@ impl Book {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn text(_: &Path, _: &str) -> Result<Book, String> {
+    fn text(_: &Path, _: Vec<Block>, _: Option<ZipArchive<BufReader<File>>>) -> Result<Book, String> {
         Err(mac_only("Text books"))
     }
 
@@ -343,33 +407,31 @@ impl Book {
     /// One page. Pictures come back as their file's bytes; PDF and text
     /// pages come back drawn at `target`. Called from the page loader only.
     pub fn page(&self, page: usize, target: Target) -> Result<Page, String> {
-        let name = self.pages.get(page).ok_or("a missing page")?;
         #[cfg(not(target_os = "macos"))]
         let _ = target;
+        let name = self.names.get(page).map(String::as_str).unwrap_or("");
         match &self.kind {
             Kind::Folder(paths) => {
-                let size = fs::metadata(&paths[page]).map(|m| m.len()).unwrap_or(0);
+                let file = paths.get(page).ok_or("a missing page")?;
+                let size = fs::metadata(file).map(|m| m.len()).unwrap_or(0);
                 if size > MAX_READ {
                     return Err(format!("{name} is too big to show"));
                 }
-                fs::read(&paths[page]).map(Page::Bytes).map_err(|e| format!("{name}: {e}"))
+                fs::read(file).map(Page::Bytes).map_err(|e| format!("{name}: {e}"))
             }
-            Kind::Zip(archive) => {
-                let mut archive = archive.lock().unwrap_or_else(|e| e.into_inner());
-                let mut entry = archive.by_name(name).map_err(|e| format!("{name}: {e}"))?;
-                if entry.size() > MAX_READ {
-                    return Err(format!("{name} is too big to show"));
-                }
-                let mut bytes = Vec::with_capacity(entry.size() as usize);
-                entry.by_ref().take(MAX_READ).read_to_end(&mut bytes).map_err(|e| format!("{name}: {e}"))?;
-                Ok(Page::Bytes(bytes))
-            }
-            #[cfg(target_os = "macos")]
+            Kind::Zip(archive) => zip_entry(archive, name).map(Page::Bytes),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             Kind::Archive(archive) => archive.lock().unwrap_or_else(|e| e.into_inner()).read(page).map(Page::Bytes).map_err(|e| format!("{name}: {e}")),
             #[cfg(target_os = "macos")]
             Kind::Pdf(pdf) => pdf.render(page, target).map(Page::Drawn),
             #[cfg(target_os = "macos")]
-            Kind::Text(text) => text.render(page, target).map(Page::Drawn),
+            Kind::Text(text, pictures) => match text.render(page, target)? {
+                crate::native::TextPage::Words(img) => Ok(Page::Drawn(img)),
+                crate::native::TextPage::Picture(name) => match pictures {
+                    Some(zip) => zip_entry(zip, &name).map(Page::Bytes),
+                    None => Err(format!("{name}: missing")),
+                },
+            },
             Kind::Adapter(link) => {
                 let answer = link.request("book.page", json!({ "path": self.path, "page": page, "name": name }), OPEN_TIMEOUT)?;
                 if let Some(file) = answer["file"].as_str() {
@@ -384,10 +446,63 @@ impl Book {
     }
 }
 
-/// Whether ComicInfo.xml marks a book as manga.
-fn says_manga(xml: &str) -> bool {
-    let lower = xml.to_ascii_lowercase();
-    lower.contains("<manga>yes")
+fn zip_entry(archive: &Mutex<ZipArchive<BufReader<File>>>, name: &str) -> Result<Vec<u8>, String> {
+    let mut archive = archive.lock().unwrap_or_else(|e| e.into_inner());
+    let mut entry = archive.by_name(name).map_err(|e| format!("{name}: {e}"))?;
+    if entry.size() > MAX_READ {
+        return Err(format!("{name} is too big to show"));
+    }
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry.by_ref().take(MAX_READ).read_to_end(&mut bytes).map_err(|e| format!("{name}: {e}"))?;
+    Ok(bytes)
+}
+
+/// Publishers and imprints whose books are read one way, as ComicInfo.xml
+/// names them (lowercase).
+const MANGA_PUBLISHERS: &[&str] = &[
+    "shueisha", "kodansha", "shogakukan", "viz", "yen press", "seven seas", "square enix", "hakusensha",
+    "akita shoten", "kadokawa", "futabasha", "vertical", "tokyopop", "j-novel", "denpa", "one peace",
+];
+const COMIC_PUBLISHERS: &[&str] = &[
+    "marvel", "dc comics", "image comics", "dark horse comics", "idw", "boom! studios", "boom studios",
+    "dynamite", "valiant", "oni press", "titan comics", "archie", "aftershock", "vault comics", "mad cave",
+    "fantagraphics", "drawn & quarterly", "rebellion", "2000 ad", "skybound", "vertigo",
+];
+const WEBTOON_PUBLISHERS: &[&str] = &["webtoon", "naver", "kakao", "lezhin", "tapas", "tappytoon", "manta"];
+
+/// How ComicInfo.xml says to read a book, if it says: its Manga field
+/// (Yes or No), a webtoon format, the publisher, or the language.
+fn comic_info_mode(xml: &str) -> Option<Mode> {
+    let field = |name: &str| -> Option<String> {
+        let lower = xml.to_ascii_lowercase();
+        let start = lower.find(&format!("<{name}>"))? + name.len() + 2;
+        let end = start + lower[start..].find('<')?;
+        Some(lower[start..end].trim().to_owned())
+    };
+    match field("manga").as_deref() {
+        Some(m) if m.starts_with("yes") => return Some(Mode::Manga),
+        Some("no") => return Some(Mode::Comic),
+        _ => {}
+    }
+    if field("format").is_some_and(|f| f.contains("webtoon") || f.contains("web comic") || f.contains("webcomic")) {
+        return Some(Mode::Webtoon);
+    }
+    for publisher in [field("publisher"), field("imprint")].into_iter().flatten() {
+        let named = |list: &[&str]| list.iter().any(|p| publisher.contains(p)) ;
+        if named(WEBTOON_PUBLISHERS) {
+            return Some(Mode::Webtoon);
+        }
+        if named(MANGA_PUBLISHERS) {
+            return Some(Mode::Manga);
+        }
+        if named(COMIC_PUBLISHERS) || publisher == "dc" {
+            return Some(Mode::Comic);
+        }
+    }
+    match field("languageiso").as_deref() {
+        Some("ja") | Some("jp") => Some(Mode::Manga),
+        _ => None,
+    }
 }
 
 /// Decodes standard base64 (padding and line breaks allowed).
@@ -480,6 +595,19 @@ mod tests {
         assert_eq!(base64("TGVhZg==").unwrap(), b"Leaf");
         assert_eq!(base64("TGVh\nZmxldA").unwrap(), b"Leaflet");
         assert!(base64("*").is_none());
+    }
+
+    #[test]
+    fn comic_info_says_how_to_read() {
+        let info = |body: &str| comic_info_mode(&format!("<?xml version=\"1.0\"?><ComicInfo>{body}</ComicInfo>"));
+        assert_eq!(info("<Manga>YesAndRightToLeft</Manga>"), Some(Mode::Manga));
+        assert_eq!(info("<Manga>No</Manga><LanguageISO>ja</LanguageISO>"), Some(Mode::Comic));
+        assert_eq!(info("<Manga>Unknown</Manga><Publisher>Image Comics</Publisher>"), Some(Mode::Comic));
+        assert_eq!(info("<Publisher>DC</Publisher>"), Some(Mode::Comic));
+        assert_eq!(info("<Publisher>VIZ Media</Publisher>"), Some(Mode::Manga));
+        assert_eq!(info("<Format>Webtoon</Format>"), Some(Mode::Webtoon));
+        assert_eq!(info("<LanguageISO>ja</LanguageISO>"), Some(Mode::Manga));
+        assert_eq!(info("<Title>Something</Title>"), None);
     }
 
     #[test]

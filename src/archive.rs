@@ -1,5 +1,6 @@
 //! RAR, 7-Zip and TAR comics (`.cbr`, `.cb7`, `.cbt`) through libarchive,
-//! which macOS ships, so Leaf adds nothing to read them.
+//! which macOS ships (and most Linux systems have), so Leaf adds nothing to
+//! read them.
 //!
 //! libarchive reads an archive from start to end. Leaf keeps one reader open
 //! and moves it forward, so reading on (the usual case) never re-reads
@@ -8,6 +9,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 #[repr(C)]
 struct Archive {
@@ -24,8 +26,51 @@ const EOF: c_int = 1;
 const WARN: c_int = -20;
 const REGULAR_FILE: u32 = 0o100000;
 
-#[link(name = "archive")]
-unsafe extern "C" {
+/// libarchive's calls Leaf uses. On macOS libarchive is part of the system
+/// and linked in; on Linux it's looked for when the first archive opens, so
+/// Leaf still starts (and reads everything else) on a system without it.
+macro_rules! libarchive {
+    ($(fn $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {
+        struct Lib {
+            $($name: unsafe extern "C" fn($($ty),*) -> $ret,)*
+        }
+
+        #[cfg(target_os = "macos")]
+        #[link(name = "archive")]
+        unsafe extern "C" {
+            $(fn $name($($arg: $ty),*) -> $ret;)*
+        }
+
+        #[cfg(target_os = "macos")]
+        fn load() -> Result<Lib, String> {
+            Ok(Lib { $($name,)* })
+        }
+
+        #[cfg(target_os = "linux")]
+        fn load() -> Result<Lib, String> {
+            // SAFETY: dlopen and dlsym with C strings; each symbol is cast to
+            // the signature libarchive declares for it.
+            unsafe {
+                let handle = [c"libarchive.so.13", c"libarchive.so"]
+                    .iter()
+                    .map(|n| libc::dlopen(n.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL))
+                    .find(|h| !h.is_null())
+                    .ok_or("RAR, 7-Zip and TAR comics need libarchive: install your system's libarchive13 (or libarchive) package")?;
+                Ok(Lib {
+                    $($name: {
+                        let symbol = libc::dlsym(handle, concat!(stringify!($name), "\0").as_ptr().cast());
+                        if symbol.is_null() {
+                            return Err(format!("this system's libarchive is too old (no {})", stringify!($name)));
+                        }
+                        std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($ty),*) -> $ret>(symbol)
+                    },)*
+                })
+            }
+        }
+    };
+}
+
+libarchive! {
     fn archive_read_new() -> *mut Archive;
     fn archive_read_support_filter_all(a: *mut Archive) -> c_int;
     fn archive_read_support_format_all(a: *mut Archive) -> c_int;
@@ -42,12 +87,19 @@ unsafe extern "C" {
     fn archive_entry_is_encrypted(e: *mut Entry) -> c_int;
 }
 
+static LIB: OnceLock<Result<Lib, String>> = OnceLock::new();
+
+fn lib() -> Result<&'static Lib, String> {
+    LIB.get_or_init(load).as_ref().map_err(Clone::clone)
+}
+
 /// The biggest single page Leaf will unpack. A real page is a few MB; this
 /// stops a crafted archive from claiming gigabytes.
 pub const MAX_PAGE: u64 = 256 * 1024 * 1024;
 
 /// An open archive positioned somewhere in its entries.
 struct Reader {
+    lib: &'static Lib,
     a: *mut Archive,
     /// The index of the entry the next header read returns.
     next: usize,
@@ -60,16 +112,17 @@ unsafe impl Send for Reader {}
 impl Reader {
     fn open(path: &Path) -> Result<Reader, String> {
         let c = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| "a path with a zero byte")?;
+        let lib = lib()?;
         // SAFETY: a fresh reader, freed in Drop.
         unsafe {
-            let a = archive_read_new();
+            let a = (lib.archive_read_new)();
             if a.is_null() {
                 return Err("out of memory".into());
             }
-            let r = Reader { a, next: 0 };
-            archive_read_support_filter_all(a);
-            archive_read_support_format_all(a);
-            if archive_read_open_filename(a, c.as_ptr(), 1 << 16) != OK {
+            let r = Reader { lib, a, next: 0 };
+            (lib.archive_read_support_filter_all)(a);
+            (lib.archive_read_support_format_all)(a);
+            if (lib.archive_read_open_filename)(a, c.as_ptr(), 1 << 16) != OK {
                 return Err(r.error());
             }
             Ok(r)
@@ -78,7 +131,7 @@ impl Reader {
 
     fn error(&self) -> String {
         // SAFETY: libarchive returns a C string it owns, or null.
-        let s = unsafe { archive_error_string(self.a) };
+        let s = unsafe { (self.lib.archive_error_string)(self.a) };
         if s.is_null() { "the archive couldn't be read".into() } else { unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned() }
     }
 
@@ -87,22 +140,22 @@ impl Reader {
         let mut e: *mut Entry = std::ptr::null_mut();
         // SAFETY: e is filled by libarchive and valid until the next header read.
         unsafe {
-            match archive_read_next_header(self.a, &mut e) {
+            match (self.lib.archive_read_next_header)(self.a, &mut e) {
                 OK | WARN => {}
                 EOF => return Ok(None),
                 _ => return Err(self.error()),
             }
             self.next += 1;
-            let mut name = archive_entry_pathname_utf8(e);
+            let mut name = (self.lib.archive_entry_pathname_utf8)(e);
             if name.is_null() {
-                name = archive_entry_pathname(e);
+                name = (self.lib.archive_entry_pathname)(e);
             }
             let name = if name.is_null() { String::new() } else { CStr::from_ptr(name).to_string_lossy().into_owned() };
             Ok(Some(Header {
                 name,
-                file: archive_entry_filetype(e) == REGULAR_FILE,
-                size: archive_entry_size(e).max(0) as u64,
-                encrypted: archive_entry_is_encrypted(e) != 0,
+                file: (self.lib.archive_entry_filetype)(e) == REGULAR_FILE,
+                size: (self.lib.archive_entry_size)(e).max(0) as u64,
+                encrypted: (self.lib.archive_entry_is_encrypted)(e) != 0,
             }))
         }
     }
@@ -116,7 +169,7 @@ impl Reader {
         let mut buf = vec![0u8; 1 << 16];
         loop {
             // SAFETY: buf is writable for its length.
-            let n = unsafe { archive_read_data(self.a, buf.as_mut_ptr().cast(), buf.len()) };
+            let n = unsafe { (self.lib.archive_read_data)(self.a, buf.as_mut_ptr().cast(), buf.len()) };
             match n {
                 0 => return Ok(out),
                 n if n < 0 => return Err(self.error()),
@@ -132,14 +185,14 @@ impl Reader {
 
     fn skip(&mut self) {
         // SAFETY: skipping the current entry's data is always allowed.
-        unsafe { archive_read_data_skip(self.a) };
+        unsafe { (self.lib.archive_read_data_skip)(self.a) };
     }
 }
 
 impl Drop for Reader {
     fn drop(&mut self) {
         // SAFETY: a was made by archive_read_new and is freed once.
-        unsafe { archive_read_free(self.a) };
+        unsafe { (self.lib.archive_read_free)(self.a) };
     }
 }
 
@@ -243,5 +296,29 @@ mod tests {
         assert_eq!(book.read(1).unwrap(), b"two");
         assert!(book.read(9).is_err());
         assert!(Book::open(&dir.join("missing.cbr"), |_| true).is_err());
+    }
+
+    /// A real RAR, made with RARLAB's `rar` when it's installed (the
+    /// release build installs it). `LEAF_REQUIRE_RAR=1` makes its absence
+    /// a failure rather than a skip.
+    #[test]
+    fn reads_a_real_rar() {
+        let dir = std::env::temp_dir().join(format!("leaf-rar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("in/Chapter 1")).unwrap();
+        for (name, body) in [("p10.png", "ten"), ("p2.png", "two"), ("p1.png", "one")] {
+            std::fs::write(dir.join("in/Chapter 1").join(name), body).unwrap();
+        }
+        let rar = dir.join("book.cbr");
+        let made = std::process::Command::new("rar").arg("a").arg("-r").arg("-idq").arg(&rar).arg("Chapter 1").current_dir(dir.join("in")).status();
+        if !made.is_ok_and(|s| s.success()) {
+            assert!(std::env::var_os("LEAF_REQUIRE_RAR").is_none(), "rar isn't installed");
+            eprintln!("skipped: rar isn't installed");
+            return;
+        }
+        let mut listing = Book::open(&rar, |n| n.ends_with(".png")).unwrap();
+        assert_eq!(listing.pages, ["Chapter 1/p1.png", "Chapter 1/p2.png", "Chapter 1/p10.png"]);
+        assert_eq!(listing.book.read(2).unwrap(), b"ten");
+        assert_eq!(listing.book.read(0).unwrap(), b"one");
     }
 }

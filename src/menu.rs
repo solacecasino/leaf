@@ -1,10 +1,11 @@
-//! The macOS menu bar: Leaf, File, View, Go, Adapters (only when some are
-//! installed), Window and Help. It's built from the key bindings, so it
+//! The menu bar: Leaf, File, View, Go, Adapters (only when some are
+//! installed), Window (macOS) and Help, at the top of the screen on macOS
+//! and of the window on Windows. It's built from the key bindings, so it
 //! shows the user's own shortcuts, and every item is a named command the app
 //! runs exactly like a key press. It's rebuilt when the book or the adapters
 //! change; the View checkmarks are updated in place.
 //!
-//! Other systems get no menu bar yet; every command has a key.
+//! Linux gets no menu bar yet (it would need GTK); every command has a key.
 
 use crate::adapters::{Adapter, command_name};
 use crate::keys::Keys;
@@ -28,6 +29,7 @@ pub struct View {
     pub pair_cover: bool,
     pub rtl: bool,
     pub fit_width: bool,
+    pub magnifier: bool,
 }
 
 /// The menu text for a built-in command.
@@ -52,6 +54,11 @@ fn label(command: &str) -> &'static str {
         "last" => "Last Page",
         "open-config-folder" => "Open Config Folder",
         "edit-keys" => "Edit Key Bindings",
+        "edit-settings" => "Edit Settings",
+        "toggle-magnifier" => "Magnifier",
+        "go-to-page" => "Go to Page…",
+        "next-book" => "Next Book in Folder",
+        "prev-book" => "Previous Book in Folder",
         "show-adapters-folder" => "Show Adapters Folder",
         "reload-adapters" => "Reload Adapters",
         "show-log" => "Show Log",
@@ -62,11 +69,11 @@ fn label(command: &str) -> &'static str {
     }
 }
 
-#[cfg(target_os = "macos")]
-pub use mac::MenuBar;
+#[cfg(any(target_os = "macos", windows))]
+pub use bar::MenuBar;
 
-#[cfg(target_os = "macos")]
-mod mac {
+#[cfg(any(target_os = "macos", windows))]
+mod bar {
     use super::{Content, Mode, View, command_name, label};
     use muda::accelerator::Accelerator;
     use muda::{AboutMetadataBuilder, CheckMenuItem, Icon, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -135,28 +142,40 @@ mod mac {
     impl MenuBar {
         /// Builds the menus and makes them the app's menu bar. `send` gets the
         /// command of each item chosen; it's called on the main thread.
-        pub fn install(content: &Content<'_>, send: impl Fn(String) + Send + Sync + 'static) -> Self {
+        pub fn install(content: &Content<'_>, window: &winit::window::Window, send: impl Fn(String) + Send + Sync + 'static) -> Self {
             let mut b = Builder { content, commands: Vec::new() };
             let book = content.view.has_book;
             let menu = Menu::new();
             let sep = PredefinedMenuItem::separator;
 
             let app = Submenu::new("Leaf", true);
-            app.append_items(&[
-                &PredefinedMenuItem::about(Some("About Leaf"), Some(about())),
-                &sep(),
-                &b.builtin("open-config-folder", true),
-                &b.builtin("edit-keys", true),
-                &b.builtin("show-adapters-folder", true),
-                &b.builtin("reload-adapters", true),
-                &sep(),
-                &PredefinedMenuItem::hide(None),
-                &PredefinedMenuItem::hide_others(None),
-                &PredefinedMenuItem::show_all(None),
-                &sep(),
-                &b.builtin("quit", true),
-            ])
-            .expect("menu builds");
+            let config = [
+                b.builtin("open-config-folder", true),
+                b.builtin("edit-keys", true),
+                b.builtin("edit-settings", true),
+                b.builtin("show-adapters-folder", true),
+                b.builtin("reload-adapters", true),
+            ];
+            #[cfg(target_os = "macos")]
+            {
+                app.append_items(&[&PredefinedMenuItem::about(Some("About Leaf"), Some(about())), &sep()]).expect("menu builds");
+                for item in &config {
+                    app.append(item).expect("menu builds");
+                }
+                app.append_items(&[
+                    &sep(),
+                    &PredefinedMenuItem::hide(None),
+                    &PredefinedMenuItem::hide_others(None),
+                    &PredefinedMenuItem::show_all(None),
+                    &sep(),
+                    &b.builtin("quit", true),
+                ])
+                .expect("menu builds");
+            }
+            #[cfg(windows)]
+            for item in &config {
+                app.append(item).expect("menu builds");
+            }
 
             let file = Submenu::new("File", true);
             let recent = Submenu::new("Open Recent", !content.recent.is_empty());
@@ -167,6 +186,9 @@ mod mac {
             file.append_items(&[&b.builtin("open-file", true), &b.builtin("open-folder", true), &recent, &sep(), &b.builtin("close-book", book)])
                 .expect("menu builds");
             b.adapter_items(&file, "file");
+            // Windows keeps Exit at the bottom of File.
+            #[cfg(windows)]
+            file.append_items(&[&sep(), &b.item("quit", "Exit", true)]).expect("menu builds");
 
             let view = Submenu::new("View", true);
             let checks: Vec<(String, CheckMenuItem)> = CHECKS.iter().map(|c| (c.to_string(), b.check(c, checked(&content.view, c), book))).collect();
@@ -180,6 +202,7 @@ mod mac {
                 item("pair-cover"),
                 item("toggle-rtl"),
                 item("toggle-fit"),
+                item("toggle-magnifier"),
                 &sep(),
                 &b.builtin("fullscreen", true),
             ])
@@ -193,6 +216,10 @@ mod mac {
                 &sep(),
                 &b.builtin("first", book),
                 &b.builtin("last", book),
+                &b.builtin("go-to-page", book),
+                &sep(),
+                &b.builtin("next-book", book),
+                &b.builtin("prev-book", book),
             ])
             .expect("menu builds");
             b.adapter_items(&go, "go");
@@ -215,17 +242,34 @@ mod mac {
                 menu.append(&adapters).expect("menu builds");
             }
 
-            let window = Submenu::new("Window", true);
-            window
-                .append_items(&[&PredefinedMenuItem::minimize(None), &PredefinedMenuItem::maximize(None)])
-                .expect("menu builds");
             let help = Submenu::new("Help", true);
             help.append_items(&[&b.builtin("help", true), &b.builtin("show-log", true), &b.builtin("copy-debug-info", true)]).expect("menu builds");
-            menu.append_items(&[&window, &help]).expect("menu builds");
 
-            menu.init_for_nsapp();
-            window.set_as_windows_menu_for_nsapp();
-            help.set_as_help_menu_for_nsapp();
+            #[cfg(target_os = "macos")]
+            {
+                let _ = window;
+                let windows = Submenu::new("Window", true);
+                windows
+                    .append_items(&[&PredefinedMenuItem::minimize(None), &PredefinedMenuItem::maximize(None)])
+                    .expect("menu builds");
+                menu.append_items(&[&windows, &help]).expect("menu builds");
+                menu.init_for_nsapp();
+                windows.set_as_windows_menu_for_nsapp();
+                help.set_as_help_menu_for_nsapp();
+            }
+            #[cfg(windows)]
+            {
+                use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                help.append_items(&[&PredefinedMenuItem::separator(), &PredefinedMenuItem::about(Some("About Leaf"), Some(about()))])
+                    .expect("menu builds");
+                menu.append(&help).expect("menu builds");
+                if let Ok(RawWindowHandle::Win32(h)) = window.window_handle().map(|h| h.as_raw()) {
+                    // SAFETY: the window's own handle, which outlives the menu.
+                    if let Err(e) = unsafe { menu.init_for_hwnd(h.hwnd.get()) } {
+                        crate::log::push("leaf", format!("couldn't add the menu bar: {e}"));
+                    }
+                }
+            }
 
             // muda allows one handler per process; ids are looked up in
             // whichever menu bar is current when the event arrives.
@@ -247,7 +291,8 @@ mod mac {
         }
     }
 
-    const CHECKS: [&str; 7] = ["mode-comic", "mode-manga", "mode-webtoon", "toggle-spreads", "pair-cover", "toggle-rtl", "toggle-fit"];
+    const CHECKS: [&str; 8] =
+        ["mode-comic", "mode-manga", "mode-webtoon", "toggle-spreads", "pair-cover", "toggle-rtl", "toggle-fit", "toggle-magnifier"];
 
     fn checked(view: &View, command: &str) -> bool {
         match command {
@@ -258,6 +303,7 @@ mod mac {
             "pair-cover" => view.pair_cover,
             "toggle-rtl" => view.rtl,
             "toggle-fit" => view.fit_width,
+            "toggle-magnifier" => view.magnifier,
             _ => false,
         }
     }
@@ -274,12 +320,12 @@ mod mac {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub struct MenuBar;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 impl MenuBar {
-    pub fn install(_: &Content<'_>, _: impl Fn(String) + Send + Sync + 'static) -> Self {
+    pub fn install(_: &Content<'_>, _: &winit::window::Window, _: impl Fn(String) + Send + Sync + 'static) -> Self {
         MenuBar
     }
     pub fn command(&self, _: &str) -> Option<String> {

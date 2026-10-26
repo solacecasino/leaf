@@ -1,6 +1,6 @@
 [package]
 name = "leaf"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 description = "A bare, instant comic and manga reader that reopens where you left off."
 license = "MIT"
@@ -21,9 +21,12 @@ toml = "0.9"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# macOS: the native menu bar, and books opened from Finder (Apple Events).
+# The native menu bar (macOS and Windows).
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+muda = { version = "0.21.2", default-features = false }
+
+# macOS: books opened from Finder (Apple Events), and documents imported by AppKit.
 [target.'cfg(target_os = "macos")'.dependencies]
-muda = "0.21.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
 

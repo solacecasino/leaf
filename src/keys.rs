@@ -38,26 +38,34 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("cmd+up", "first"),
     ("cmd+down", "last"),
     ("cmd+,", "open-config-folder"),
+    ("z", "toggle-magnifier"),
+    ("g", "go-to-page"),
+    ("cmd+g", "go-to-page"),
+    ("cmd+]", "next-book"),
+    ("cmd+[", "prev-book"),
 ];
 
 pub const COMMANDS: &[&str] = &[
-    "next", "prev", "page-right", "page-left", "first", "last", "mode-comic", "mode-manga", "mode-webtoon",
-    "toggle-spreads", "pair-cover", "toggle-rtl", "toggle-fit", "copy-debug-info",
-    "fullscreen", "leave-fullscreen", "open-file", "open-folder", "close-book", "quit",
-    "open-config-folder", "show-adapters-folder", "reload-adapters", "show-log", "edit-keys", "help", "none",
+    "next", "prev", "page-right", "page-left", "first", "last", "go-to-page", "next-book", "prev-book",
+    "mode-comic", "mode-manga", "mode-webtoon", "toggle-spreads", "pair-cover", "toggle-rtl", "toggle-fit",
+    "toggle-magnifier", "copy-debug-info", "fullscreen", "leave-fullscreen", "open-file", "open-folder",
+    "close-book", "quit", "open-config-folder", "show-adapters-folder", "reload-adapters", "show-log",
+    "edit-keys", "edit-settings", "help", "none",
 ];
 
 const EXAMPLE: &str = r#"# Leaf key bindings. Lines here add to or replace the built-in ones.
-# Saved changes apply the next time Leaf starts.
+# Saved changes apply straight away.
 #
 # Keys are written like "cmd+shift+o": cmd means Cmd on macOS and Ctrl
 # elsewhere. Named keys: right left up down space pageup pagedown home end
-# escape backspace enter tab.
+# escape backspace enter tab. Brackets are "[" and "]".
 #
 # Commands:
 #   next, prev            the next/previous screen (scrolls first in fit-width)
 #   page-right, page-left  turn toward that side (respects right-to-left)
 #   first, last
+#   go-to-page            type a page number, then Return
+#   next-book, prev-book  the next or previous book in the same folder
 #   mode-comic            one page, left to right
 #   mode-manga            two pages, right to left
 #   mode-webtoon          one long strip, scrolled down
@@ -65,10 +73,11 @@ const EXAMPLE: &str = r#"# Leaf key bindings. Lines here add to or replace the b
 #   pair-cover            pair the cover with page 2 (when spreads are off by one)
 #   toggle-rtl            right-to-left reading
 #   toggle-fit            fit the whole page or fit the width
+#   toggle-magnifier      enlarge what's under the pointer
 #   fullscreen, leave-fullscreen
 #   open-file, open-folder, close-book, quit
 #   open-config-folder, show-adapters-folder, reload-adapters, show-log,
-#   copy-debug-info, edit-keys, help
+#   copy-debug-info, edit-keys, edit-settings, help
 #   adapter "Name" id     an adapter's command
 #   none                  unbind a built-in key
 #
@@ -176,6 +185,8 @@ pub fn accelerator(key: &str) -> Option<String> {
         "," => "Comma".into(),
         "." => "Period".into(),
         "/" => "Slash".into(),
+        "[" => "BracketLeft".into(),
+        "]" => "BracketRight".into(),
         "+" => "Equal".into(),
         "-" => "Minus".into(),
         other if other.chars().count() == 1 => other.to_uppercase(),
@@ -235,6 +246,7 @@ mod tests {
         assert_eq!(accelerator("cmd+,").as_deref(), Some("CmdOrCtrl+Comma"));
         assert_eq!(accelerator("cmd+ctrl+f").as_deref(), Some("CmdOrCtrl+Ctrl+F"));
         assert_eq!(accelerator("cmd+up").as_deref(), Some("CmdOrCtrl+ArrowUp"));
+        assert_eq!(accelerator("cmd+]").as_deref(), Some("CmdOrCtrl+BracketRight"));
     }
 
     #[test]
