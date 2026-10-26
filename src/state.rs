@@ -32,12 +32,26 @@ pub struct State {
     pub last: Option<PathBuf>,
     #[serde(default)]
     pub books: HashMap<String, BookState>,
+    /// Books opened lately, newest first, for File → Open Recent.
+    #[serde(default)]
+    pub recent: Vec<PathBuf>,
     /// Logical window size.
     #[serde(default)]
     pub window: Option<(f64, f64)>,
     /// The display scale the window was last on, to size the first page before the window opens.
     #[serde(default)]
     pub scale: Option<f64>,
+}
+
+const RECENT_KEPT: usize = 10;
+
+impl State {
+    pub fn opened(&mut self, path: &std::path::Path) {
+        self.last = Some(path.to_path_buf());
+        self.recent.retain(|p| p != path);
+        self.recent.insert(0, path.to_path_buf());
+        self.recent.truncate(RECENT_KEPT);
+    }
 }
 
 fn home() -> PathBuf {

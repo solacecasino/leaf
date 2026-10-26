@@ -5,8 +5,11 @@ use std::cmp::Ordering;
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use zip::ZipArchive;
+
+use crate::adapters::{Link, OPEN_TIMEOUT};
+use serde_json::json;
 
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "bmp"];
 
@@ -21,6 +24,8 @@ pub struct Book {
 enum Kind {
     Folder(Vec<PathBuf>),
     Zip(Mutex<ZipArchive<BufReader<File>>>),
+    /// A format an adapter reads for Leaf (`opens` in adapter.toml).
+    Adapter(Arc<Link>),
 }
 
 enum Sniff {
@@ -76,7 +81,7 @@ impl Book {
                 let book = Self::folder(parent)?;
                 let start = match &book.kind {
                     Kind::Folder(files) => files.iter().position(|f| f == path),
-                    Kind::Zip(_) => None,
+                    _ => None,
                 };
                 Ok((book, start))
             }
@@ -85,6 +90,36 @@ impl Book {
             Sniff::Pdf => Err("PDFs aren't supported in this prototype yet".into()),
             Sniff::Unknown => Err(format!("{} isn't a book Leaf can read", stem(path))),
         }
+    }
+
+    /// Whether Leaf can't read `path` itself, so an adapter might.
+    pub fn needs_adapter(path: &Path) -> bool {
+        path.is_file() && matches!(sniff(path), Sniff::Rar | Sniff::SevenZip | Sniff::Pdf | Sniff::Unknown)
+    }
+
+    /// The adapter this book is read through, if any.
+    pub fn adapter(&self) -> Option<&str> {
+        match &self.kind {
+            Kind::Adapter(link) => Some(link.name()),
+            _ => None,
+        }
+    }
+
+    /// Opens a book through an adapter: it lists the pages, then hands Leaf
+    /// each page's image as it's needed.
+    pub fn through_adapter(path: &Path, link: Arc<Link>) -> Result<Book, String> {
+        let answer = link.request("book.open", json!({ "path": path }), OPEN_TIMEOUT)?;
+        let pages: Vec<String> = answer["pages"]
+            .as_array()
+            .ok_or("the adapter's book.open answer has no `pages`")?
+            .iter()
+            .map(|p| p.as_str().map(String::from).unwrap_or_else(|| p.to_string()))
+            .collect();
+        if pages.is_empty() {
+            return Err(format!("{} has no pages", stem(path)));
+        }
+        let name = answer["name"].as_str().map(String::from).unwrap_or_else(|| stem(path));
+        Ok(Book { path: path.to_path_buf(), name, pages, kind: Kind::Adapter(link) })
     }
 
     fn folder(dir: &Path) -> Result<Book, String> {
@@ -126,8 +161,43 @@ impl Book {
                 entry.read_to_end(&mut bytes).map_err(|e| format!("{name}: {e}"))?;
                 Ok(bytes)
             }
+            Kind::Adapter(link) => {
+                let answer = link.request("book.page", json!({ "path": self.path, "page": page, "name": name }), OPEN_TIMEOUT)?;
+                if let Some(file) = answer["file"].as_str() {
+                    fs::read(file).map_err(|e| format!("{name}: {e}"))
+                } else if let Some(data) = answer["base64"].as_str() {
+                    base64(data).ok_or_else(|| format!("{name}: the adapter sent bad base64"))
+                } else {
+                    Err(format!("{name}: the adapter's answer has no `file` or `base64`"))
+                }
+            }
         }
     }
+}
+
+/// Decodes standard base64 (padding and line breaks allowed).
+fn base64(text: &str) -> Option<Vec<u8>> {
+    let value = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let digits: Vec<u8> = text.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=').collect();
+    let mut out = Vec::with_capacity(digits.len() * 3 / 4);
+    for chunk in digits.chunks(4) {
+        let mut n = 0u32;
+        for (i, &c) in chunk.iter().enumerate() {
+            n |= value(c)? << (18 - 6 * i);
+        }
+        let bytes = n.to_be_bytes();
+        out.extend_from_slice(&bytes[1..chunk.len()]);
+    }
+    Some(out)
 }
 
 /// Collects images under `dir`, a few levels deep so chapter folders work.
@@ -187,6 +257,14 @@ mod tests {
         let mut names = vec!["p10.jpg", "p2.jpg", "P1.jpg", "p02b.jpg", "ch1/p3.jpg"];
         names.sort_by(|a, b| natural_cmp(a, b));
         assert_eq!(names, ["ch1/p3.jpg", "P1.jpg", "p2.jpg", "p02b.jpg", "p10.jpg"]);
+    }
+
+    #[test]
+    fn decodes_base64() {
+        assert_eq!(base64("aGk=").unwrap(), b"hi");
+        assert_eq!(base64("TGVhZg==").unwrap(), b"Leaf");
+        assert_eq!(base64("TGVh\nZmxldA").unwrap(), b"Leaflet");
+        assert!(base64("*").is_none());
     }
 
     #[test]

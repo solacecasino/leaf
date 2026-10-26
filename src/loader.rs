@@ -9,7 +9,6 @@ use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
-use winit::event_loop::EventLoopProxy;
 
 /// Decoded full-size pages kept for re-scaling when the window resizes.
 const DECODED_KEPT: usize = 1;
@@ -50,12 +49,14 @@ pub struct Loader {
 }
 
 impl Loader {
-    pub fn new(proxy: EventLoopProxy<Done>) -> Self {
+    /// `deliver` hands each finished page to the UI; it returns false once
+    /// the UI is gone, which ends the thread.
+    pub fn new(deliver: impl Fn(Done) -> bool + Send + 'static) -> Self {
         let shared: Shared = Arc::default();
         let worker = shared.clone();
         thread::Builder::new()
             .name("pages".into())
-            .spawn(move || work(worker, proxy))
+            .spawn(move || work(worker, deliver))
             .expect("start the page loader");
         Self { shared }
     }
@@ -72,7 +73,7 @@ impl Loader {
     }
 }
 
-fn work(shared: Shared, proxy: EventLoopProxy<Done>) {
+fn work(shared: Shared, deliver: impl Fn(Done) -> bool) {
     let mut decoded: VecDeque<(u64, usize, Arc<RgbImage>)> = VecDeque::new();
     // Pages already scaled, held weakly: a repeat request (one asked again
     // before the first answer reached the UI) is answered without redoing
@@ -94,7 +95,7 @@ fn work(shared: Shared, proxy: EventLoopProxy<Done>) {
         };
         let earlier = made.iter().find(|m| (m.0, m.1, m.2) == (id, page, target)).and_then(|m| m.3.upgrade());
         if let Some(image) = earlier {
-            if proxy.send_event(Done { book: id, page, target, image: Ok(image) }).is_err() {
+            if !deliver(Done { book: id, page, target, image: Ok(image) }) {
                 return;
             }
             continue;
@@ -114,7 +115,7 @@ fn work(shared: Shared, proxy: EventLoopProxy<Done>) {
         if std::env::var_os("LEAF_TIMING").is_some() {
             eprintln!("leaf: page {} decoded and scaled in {:?}", page + 1, started.elapsed());
         }
-        if proxy.send_event(Done { book: id, page, target, image }).is_err() {
+        if !deliver(Done { book: id, page, target, image }) {
             return;
         }
     }

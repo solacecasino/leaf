@@ -1,0 +1,742 @@
+//! Adapters: optional add-ons, each a separate program in any language that
+//! talks to Leaf with JSON messages, one per line, over stdin and stdout.
+//! Leaf ships with none. They live in the `adapters` folder of the config
+//! folder, are approved by the user before they first run, and can crash
+//! without taking Leaf down. The protocol is in docs/adapters.md.
+//!
+//! Two things an adapter can do:
+//! - add **commands** (to the Adapters menu, or File, View and Go, and to
+//!   `keys.toml`), and talk back to Leaf while they run;
+//! - **open books** Leaf can't read itself (`opens = ["cbr", "pdf"]`): Leaf
+//!   asks it for the page list and then for each page's image.
+
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashMap};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Sender, channel};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// The protocol version sent in `initialize`. New versions only add things.
+pub const PROTOCOL: u32 = 1;
+
+pub const BOOK_READ: &str = "book.read";
+pub const BOOK_CONTROL: &str = "book.control";
+pub const NETWORK: &str = "network";
+const KNOWN_PERMISSIONS: [&str; 3] = [BOOK_READ, BOOK_CONTROL, NETWORK];
+
+/// How long Leaf waits for a book-opening adapter to answer.
+pub const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct Manifest {
+    pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub license: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub homepage: String,
+    /// The program and its arguments, run from the adapter's folder.
+    pub run: Vec<String>,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    #[serde(default)]
+    pub start: Start,
+    /// Events to receive while running: "opened", "page".
+    #[serde(default)]
+    pub events: Vec<String>,
+    #[serde(default)]
+    pub commands: Vec<CommandSpec>,
+    /// File extensions this adapter can open as books.
+    #[serde(default)]
+    pub opens: Vec<String>,
+}
+
+#[derive(Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Start {
+    /// When one of its commands is first chosen, or a book needs it.
+    #[default]
+    Command,
+    /// When Leaf opens.
+    Launch,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct CommandSpec {
+    pub id: String,
+    pub label: String,
+    /// A default shortcut, such as "cmd+alt+k". keys.toml can override it.
+    #[serde(default)]
+    pub keys: Option<String>,
+    /// "file", "view" or "go" to show it in that menu instead of Adapters.
+    #[serde(default)]
+    pub menu: Option<String>,
+}
+
+/// What the reader threads tell the UI.
+pub enum Message {
+    /// A notification or request from an adapter. Requests have an `id` and
+    /// must be answered with [`Host::reply`].
+    Call { adapter: String, id: Option<Value>, method: String, params: Value },
+    Stopped { adapter: String, generation: u64 },
+}
+
+/// A running adapter's pipe. Shared with the page loader, which asks
+/// book-opening adapters for pages from its own thread.
+pub struct Link {
+    name: String,
+    stdin: Mutex<ChildStdin>,
+    pending: Mutex<HashMap<u64, Sender<Result<Value, String>>>>,
+    next_id: AtomicU64,
+    alive: AtomicBool,
+}
+
+impl Link {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn write(&self, message: Value) {
+        let mut stdin = self.stdin.lock().unwrap_or_else(|e| e.into_inner());
+        // An adapter that has quit just misses the message.
+        let _ = writeln!(stdin, "{message}").and_then(|()| stdin.flush());
+    }
+
+    pub fn notify(&self, method: &str, params: Value) {
+        self.write(json!({ "method": method, "params": params }));
+    }
+
+    /// Sends a request and waits for the answer.
+    pub fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+        if !self.alive.load(Ordering::SeqCst) {
+            return Err(format!("{} has stopped", self.name));
+        }
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let (tx, rx) = channel();
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
+        self.write(json!({ "id": id, "method": method, "params": params }));
+        rx.recv_timeout(timeout).unwrap_or_else(|_| {
+            self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+            Err(format!("{} didn't answer {method} in time", self.name))
+        })
+    }
+
+    fn answered(&self, id: u64, result: Result<Value, String>) {
+        if let Some(tx) = self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
+            let _ = tx.send(result);
+        }
+    }
+
+    fn stopped(&self) {
+        self.alive.store(false, Ordering::SeqCst);
+        for (_, tx) in self.pending.lock().unwrap_or_else(|e| e.into_inner()).drain() {
+            let _ = tx.send(Err(format!("{} stopped", self.name)));
+        }
+    }
+}
+
+struct Running {
+    child: Child,
+    link: Arc<Link>,
+    generation: u64,
+}
+
+pub struct Adapter {
+    pub dir: PathBuf,
+    pub manifest: Manifest,
+    running: Option<Running>,
+}
+
+type Deliver = Arc<dyn Fn(Message) + Send + Sync>;
+
+/// All installed adapters, owned by the UI thread.
+pub struct Host {
+    pub all: Vec<Adapter>,
+    send: Deliver,
+    generation: u64,
+}
+
+impl Host {
+    pub fn new(send: impl Fn(Message) + Send + Sync + 'static) -> Self {
+        Host { all: discover(), send: Arc::new(send), generation: 0 }
+    }
+
+    /// Looks for adapters again, stopping the ones that were running.
+    pub fn reload(&mut self) {
+        self.stop_all();
+        self.all = discover();
+    }
+
+    /// Starts the adapters that ask to start with Leaf.
+    pub fn start_launch_adapters(&mut self) {
+        for i in 0..self.all.len() {
+            if self.all[i].manifest.start == Start::Launch
+                && let Err(e) = self.start(i)
+            {
+                crate::log::push("leaf", e);
+            }
+        }
+    }
+
+    pub fn index(&self, name: &str) -> Option<usize> {
+        self.all.iter().position(|a| a.manifest.name == name)
+    }
+
+    pub fn has(&self, name: &str, permission: &str) -> bool {
+        self.index(name).is_some_and(|i| self.all[i].manifest.permissions.iter().any(|p| p == permission))
+    }
+
+    /// The adapter that opens books like `path`, by extension.
+    pub fn reader_for(&self, path: &Path) -> Option<usize> {
+        let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+        self.all.iter().position(|a| a.manifest.opens.iter().any(|o| o.trim_start_matches('.').eq_ignore_ascii_case(&ext)))
+    }
+
+    /// Starts adapter `i` if it isn't running, asking the user first if it
+    /// hasn't been allowed yet.
+    pub fn start(&mut self, i: usize) -> Result<Arc<Link>, String> {
+        if let Some(r) = &self.all[i].running
+            && r.link.alive.load(Ordering::SeqCst)
+        {
+            return Ok(r.link.clone());
+        }
+        let manifest = self.all[i].manifest.clone();
+        if !approve(&manifest) {
+            return Err(format!("{} wasn't allowed to run", manifest.name));
+        }
+        let mut child = spawn(&self.all[i].dir, &manifest.run).map_err(|e| format!("Couldn't start {}: {e}", manifest.name))?;
+        self.generation += 1;
+        let generation = self.generation;
+        let stdout = child.stdout.take().expect("stdout is piped");
+        let stdin = child.stdin.take().expect("stdin is piped");
+        let link = Arc::new(Link {
+            name: manifest.name.clone(),
+            stdin: Mutex::new(stdin),
+            pending: Mutex::default(),
+            next_id: AtomicU64::new(0),
+            alive: AtomicBool::new(true),
+        });
+
+        if let Some(stderr) = child.stderr.take() {
+            let name = manifest.name.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    crate::log::push(&name, line);
+                }
+            });
+        }
+        let (reader_link, send, name) = (link.clone(), self.send.clone(), manifest.name.clone());
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                    crate::log::push(&name, format!("not a JSON message: {line}"));
+                    continue;
+                };
+                match message.get("method").and_then(Value::as_str) {
+                    Some(method) => send(Message::Call {
+                        adapter: name.clone(),
+                        id: message.get("id").cloned(),
+                        method: method.to_owned(),
+                        params: message.get("params").cloned().unwrap_or(Value::Null),
+                    }),
+                    None => {
+                        let Some(id) = message.get("id").and_then(Value::as_u64) else { continue };
+                        let result = match message.get("error") {
+                            Some(e) => Err(e.as_str().map(String::from).unwrap_or_else(|| e.to_string())),
+                            None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
+                        };
+                        reader_link.answered(id, result);
+                    }
+                }
+            }
+            reader_link.stopped();
+            send(Message::Stopped { adapter: name, generation });
+        });
+
+        link.notify(
+            "initialize",
+            json!({ "leaf": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL, "permissions": manifest.permissions }),
+        );
+        crate::log::push("leaf", format!("started {} {}", manifest.name, manifest.version));
+        self.all[i].running = Some(Running { child, link: link.clone(), generation });
+        Ok(link)
+    }
+
+    /// Runs an adapter's command, starting the adapter if needed.
+    pub fn run_command(&mut self, name: &str, id: &str) -> Result<(), String> {
+        let i = self.index(name).ok_or_else(|| format!("No adapter called {name}"))?;
+        if !self.all[i].manifest.commands.iter().any(|c| c.id == id) {
+            return Err(format!("{name} has no command {id}"));
+        }
+        self.start(i)?.notify("command", json!({ "command": id }));
+        Ok(())
+    }
+
+    /// Sends an event to the running adapters that asked for it and may read the book.
+    pub fn emit(&self, kind: &str, mut params: Value) {
+        params["kind"] = json!(kind);
+        for a in &self.all {
+            let m = &a.manifest;
+            if let Some(r) = &a.running
+                && m.events.iter().any(|e| e == kind)
+                && m.permissions.iter().any(|p| p == BOOK_READ)
+            {
+                r.link.notify("event", params.clone());
+            }
+        }
+    }
+
+    pub fn reply(&self, adapter: &str, id: Value, result: Result<Value, String>) {
+        let Some(link) = self.index(adapter).and_then(|i| self.all[i].running.as_ref()).map(|r| &r.link) else { return };
+        link.write(match result {
+            Ok(value) => json!({ "id": id, "result": value }),
+            Err(e) => json!({ "id": id, "error": e }),
+        });
+    }
+
+    /// An adapter's program ended. Ignored (and false) if it has been
+    /// stopped on purpose or restarted since.
+    pub fn stopped(&mut self, adapter: &str, generation: u64) -> bool {
+        let Some(i) = self.index(adapter) else { return false };
+        if !self.all[i].running.as_ref().is_some_and(|r| r.generation == generation) {
+            return false;
+        }
+        let mut r = self.all[i].running.take().expect("checked");
+        let status = r.child.wait().map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
+        crate::log::push("leaf", format!("{adapter} stopped ({status})"));
+        true
+    }
+
+    /// Asks every running adapter to shut down, then stops the ones that don't.
+    pub fn stop_all(&mut self) {
+        let mut children = Vec::new();
+        for a in &mut self.all {
+            if let Some(r) = a.running.take() {
+                r.link.notify("shutdown", Value::Null);
+                children.push(r.child);
+            }
+        }
+        let deadline = Instant::now() + Duration::from_millis(500);
+        for mut child in children {
+            while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        self.stop_all();
+    }
+}
+
+/// Starts the program in the adapter's folder. A program given as a path
+/// (`./unrar-pages`) is found there.
+fn spawn(dir: &Path, run: &[String]) -> Result<Child, String> {
+    let (program, args) = run.split_first().ok_or("adapter.toml has an empty `run`")?;
+    let program = if program.contains(['/', '\\']) { dir.join(program).into_os_string() } else { program.into() };
+    Command::new(&program)
+        .args(args)
+        .current_dir(dir)
+        // So adapters can keep their own files next to Leaf's.
+        .env("LEAF_CONFIG_DIR", crate::state::dir())
+        .env("PYTHONIOENCODING", "utf-8")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => format!("{} not found", program.to_string_lossy()),
+            _ => e.to_string(),
+        })
+}
+
+// ---- Finding and installing ----------------------------------------------
+
+pub fn adapters_dir() -> PathBuf {
+    crate::state::dir().join("adapters")
+}
+
+/// Installed adapters. Leaf only looks in its config folder, so nothing
+/// appears unless someone put it there.
+pub fn discover() -> Vec<Adapter> {
+    discover_in(&adapters_dir())
+}
+
+fn discover_in(root: &Path) -> Vec<Adapter> {
+    let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
+    let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.join("adapter.toml").is_file()).collect();
+    dirs.sort();
+    let mut found: Vec<Adapter> = Vec::new();
+    for dir in dirs {
+        match load_manifest(&dir) {
+            Ok(manifest) => {
+                found.retain(|a| a.manifest.name != manifest.name);
+                found.push(Adapter { dir, manifest, running: None });
+            }
+            Err(e) => crate::log::push("leaf", e),
+        }
+    }
+    found
+}
+
+fn load_manifest(dir: &Path) -> Result<Manifest, String> {
+    let path = dir.join("adapter.toml");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let manifest: Manifest = toml::from_str(&text).map_err(|e| format!("{}: {}", path.display(), e.message()))?;
+    if manifest.run.is_empty() {
+        return Err(format!("{}: `run` is empty", path.display()));
+    }
+    for p in &manifest.permissions {
+        if !KNOWN_PERMISSIONS.contains(&p.as_str()) {
+            crate::log::push("leaf", format!("{}: unknown permission \"{p}\"", manifest.name));
+        }
+    }
+    Ok(manifest)
+}
+
+/// Whether `path` is an adapter to install rather than a book: a folder
+/// with `adapter.toml`, or a zip with one at its top or one folder down.
+pub fn is_package(path: &Path) -> bool {
+    if path.is_dir() {
+        return path.join("adapter.toml").is_file();
+    }
+    zip_manifest(path).is_some()
+}
+
+fn zip_manifest(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let archive = zip::ZipArchive::new(std::io::BufReader::new(file)).ok()?;
+    archive
+        .file_names()
+        .filter_map(Result::ok)
+        .find(|n| n.trim_end_matches("adapter.toml").matches('/').count() <= 1 && n.rsplit('/').next() == Some("adapter.toml"))
+        .map(|n| n.into_owned())
+}
+
+/// Reads the manifest of a package without installing it.
+pub fn package_manifest(path: &Path) -> Result<Manifest, String> {
+    if path.is_dir() {
+        return load_manifest(path);
+    }
+    let name = zip_manifest(path).ok_or("not an adapter package")?;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file)).map_err(|e| e.to_string())?;
+    let mut text = String::new();
+    archive.by_name(&name).map_err(|e| e.to_string())?.read_to_string(&mut text).map_err(|e| e.to_string())?;
+    toml::from_str(&text).map_err(|e| format!("adapter.toml: {}", e.message()))
+}
+
+/// Copies a package into the adapters folder, replacing an older copy of
+/// the same adapter. The new copy is assembled beside it first, so a
+/// failure leaves what was there.
+pub fn install(source: &Path) -> Result<Manifest, String> {
+    install_into(source, &adapters_dir())
+}
+
+fn install_into(source: &Path, root: &Path) -> Result<Manifest, String> {
+    let manifest = package_manifest(source)?;
+    let folder: String = manifest
+        .name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    let incoming = root.join(format!(".incoming-{folder}"));
+    let _ = std::fs::remove_dir_all(&incoming);
+    let result = if source.is_dir() { copy_dir(source, &incoming).map_err(|e| e.to_string()) } else { unzip(source, &incoming) };
+    if let Err(e) = result {
+        let _ = std::fs::remove_dir_all(&incoming);
+        return Err(format!("Couldn't install {}: {e}", manifest.name));
+    }
+    let target = root.join(&folder);
+    let _ = std::fs::remove_dir_all(&target);
+    std::fs::rename(&incoming, &target).map_err(|e| e.to_string())?;
+    Ok(manifest)
+}
+
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if [".git", "target", "dist"].iter().any(|skip| name == *skip) {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            copy_dir(&path, &to.join(&name))?;
+        } else {
+            std::fs::copy(&path, to.join(&name))?;
+        }
+    }
+    Ok(())
+}
+
+/// Unpacks a zip into `to`. A zip holding one folder is unpacked from inside
+/// that folder. Paths that would escape `to` are refused.
+fn unzip(zip_path: &Path, to: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file)).map_err(|e| e.to_string())?;
+    let manifest = zip_manifest(zip_path).ok_or("not an adapter package")?;
+    let prefix = manifest.trim_end_matches("adapter.toml").to_owned();
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let Some(inside) = entry.enclosed_name() else { return Err(format!("unsafe path in zip: entry {i}")) };
+        let Ok(rel) = inside.strip_prefix(&prefix) else { continue };
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let out = to.join(rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        std::fs::write(&out, bytes).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode & 0o777));
+        }
+    }
+    Ok(())
+}
+
+// ---- Approval --------------------------------------------------------------
+
+pub fn describe(permission: &str) -> String {
+    match permission {
+        BOOK_READ => "see which book is open and the page you're on".into(),
+        BOOK_CONTROL => "open books and turn pages".into(),
+        NETWORK => "connect to the internet or other computers".into(),
+        other => other.to_owned(),
+    }
+}
+
+fn approvals_path() -> PathBuf {
+    crate::state::dir().join("approvals.json")
+}
+
+/// What `manifest` will be allowed to do, in words, for dialogs.
+pub fn summary(m: &Manifest) -> String {
+    let by = if m.author.is_empty() { String::new() } else { format!(" by {}", m.author) };
+    let mut text = format!("“{}” {}{by}.", m.name, m.version);
+    if !m.license.is_empty() {
+        text += &format!(" License: {}.", m.license);
+    }
+    if !m.description.is_empty() {
+        text += &format!("\n\n{}", m.description);
+    }
+    if !m.homepage.is_empty() {
+        text += &format!("\n{}", m.homepage);
+    }
+    if !m.opens.is_empty() {
+        text += &format!("\n\nIt opens: {}.", m.opens.join(", "));
+    }
+    if m.permissions.is_empty() {
+        text += "\n\nIt doesn't ask for any permissions.";
+    } else {
+        text += "\n\nIt asks to:";
+        for p in &m.permissions {
+            text += &format!("\n•  {}", describe(p));
+        }
+    }
+    text + "\n\nAdapters are separate programs. Only allow ones you trust."
+}
+
+fn load_approvals() -> BTreeMap<String, Vec<String>> {
+    std::fs::read_to_string(approvals_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+/// Records that the user allowed `m` with its current permissions. Installing
+/// through Leaf's dialog counts, since it showed the same details.
+pub fn remember_approval(m: &Manifest) {
+    let mut approvals = load_approvals();
+    approvals.insert(m.name.clone(), m.permissions.clone());
+    let _ = std::fs::write(approvals_path(), serde_json::to_string_pretty(&approvals).expect("serializes"));
+}
+
+/// Asks the user with a native dialog, remembering a yes in approvals.json
+/// until the adapter asks for more. Adapters copied into the folder by hand
+/// are asked about here, the first time they run.
+fn approve(m: &Manifest) -> bool {
+    if load_approvals().get(&m.name).is_some_and(|granted| m.permissions.iter().all(|p| granted.contains(p))) {
+        return true;
+    }
+    let allowed = crate::platform::confirm("Allow adapter?", &format!("{} wants to run.\n\n{}", m.name, summary(m)), "Allow", "Don't Allow");
+    if allowed {
+        remember_approval(m);
+    }
+    allowed
+}
+
+/// Reads `adapter "Name" id` from keys.toml or a menu.
+pub fn parse_command(text: &str) -> Option<(String, String)> {
+    let rest = text.strip_prefix("adapter ")?.trim_start().strip_prefix('"')?;
+    let (name, id) = rest.split_once('"')?;
+    let id = id.trim();
+    (!name.is_empty() && !id.is_empty()).then(|| (name.to_owned(), id.to_owned()))
+}
+
+pub fn command_name(adapter: &str, id: &str) -> String {
+    format!("adapter \"{adapter}\" {id}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("leaf-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A shell-script adapter that answers `book.open` and `book.page`, and
+    /// on its "hello" command asks Leaf for the book.
+    fn write_adapter(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("adapter.toml"),
+            r#"name = "Test Pages"
+version = "0.1.0"
+run = ["sh", "adapter.sh"]
+permissions = ["book.read"]
+opens = ["fake"]
+[[commands]]
+id = "hello"
+label = "Say Hello"
+keys = "cmd+alt+h"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("adapter.sh"),
+            r#"while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"book.open"'*) printf '{"id":%s,"result":{"pages":["a.png","b.png"]}}\n' "$id" ;;
+    *'"book.page"'*) printf '{"id":%s,"result":{"base64":"aGk="}}\n' "$id" ;;
+    *'"command"'*) printf '{"id":7,"method":"book.get","params":{}}\n' ;;
+    *'"shutdown"'*) exit 0 ;;
+  esac
+  echo "got $line" >&2
+done
+"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn talks_both_ways() {
+        let root = temp("talk");
+        write_adapter(&root.join("test"));
+        let found = discover_in(&root);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].manifest.commands[0].keys.as_deref(), Some("cmd+alt+h"));
+
+        let (tx, rx) = channel();
+        let tx = Mutex::new(tx);
+        let mut host = Host { all: found, send: Arc::new(move |m| drop(tx.lock().unwrap().send(m))), generation: 0 };
+        assert_eq!(host.reader_for(Path::new("/x/book.FAKE")), Some(0));
+        // Start without the dialog: spawn directly.
+        let link = {
+            let mut child = spawn(&host.all[0].dir, &host.all[0].manifest.run).unwrap();
+            let link = Arc::new(Link {
+                name: "Test Pages".into(),
+                stdin: Mutex::new(child.stdin.take().unwrap()),
+                pending: Mutex::default(),
+                next_id: AtomicU64::new(0),
+                alive: AtomicBool::new(true),
+            });
+            let (reader, send) = (link.clone(), host.send.clone());
+            let stdout = child.stdout.take().unwrap();
+            std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    let m: Value = serde_json::from_str(&line).unwrap();
+                    match m.get("method").and_then(Value::as_str) {
+                        Some(method) => send(Message::Call {
+                            adapter: "Test Pages".into(),
+                            id: m.get("id").cloned(),
+                            method: method.into(),
+                            params: Value::Null,
+                        }),
+                        None => reader.answered(m["id"].as_u64().unwrap(), Ok(m["result"].clone())),
+                    }
+                }
+                reader.stopped();
+            });
+            host.all[0].running = Some(Running { child, link: link.clone(), generation: 1 });
+            link
+        };
+
+        let pages = link.request("book.open", json!({ "path": "/x/book.fake" }), Duration::from_secs(10)).unwrap();
+        assert_eq!(pages["pages"][1], "b.png");
+        let page = link.request("book.page", json!({ "page": 0 }), Duration::from_secs(10)).unwrap();
+        assert_eq!(page["base64"], "aGk=");
+
+        host.run_command("Test Pages", "hello").unwrap();
+        match rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+            Message::Call { method, id, .. } => assert_eq!((method.as_str(), id), ("book.get", Some(json!(7)))),
+            Message::Stopped { .. } => panic!("stopped early"),
+        }
+        assert!(host.run_command("Test Pages", "nope").is_err());
+        host.stop_all();
+        assert!(link.request("book.open", Value::Null, Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn installs_folders_and_zips() {
+        let root = temp("install");
+        let src = root.join("src");
+        write_adapter(&src);
+        let dest = root.join("adapters");
+        let m = install_into(&src, &dest).unwrap();
+        assert_eq!(m.name, "Test Pages");
+        assert!(dest.join("test-pages/adapter.sh").is_file());
+
+        // The same adapter zipped inside a folder, as release zips are.
+        let zip_path = root.join("test-pages-0.1.0.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+        for name in ["adapter.toml", "adapter.sh"] {
+            zip.start_file(format!("test-pages/{name}"), opts).unwrap();
+            zip.write_all(&std::fs::read(src.join(name)).unwrap()).unwrap();
+        }
+        zip.finish().unwrap();
+        assert!(is_package(&zip_path));
+        install_into(&zip_path, &dest).unwrap();
+        assert_eq!(discover_in(&dest).len(), 1);
+        assert!(!is_package(&root));
+    }
+
+    #[test]
+    fn reads_adapter_commands() {
+        assert_eq!(parse_command(r#"adapter "Big Reader" next"#), Some(("Big Reader".into(), "next".into())));
+        assert_eq!(parse_command(&command_name("A", "b")), Some(("A".into(), "b".into())));
+        assert_eq!(parse_command("next"), None);
+    }
+}

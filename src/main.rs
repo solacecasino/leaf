@@ -1,21 +1,28 @@
 //! Leaf: a bare comic and manga reader. Opens straight back to the page you
 //! were on. All state lives in `App` on the UI thread; pages are decoded on
-//! one background thread (loader.rs).
+//! one background thread (loader.rs), adapters run as separate programs
+//! (adapters.rs), and everything reaches the UI as an [`Event`].
 
+mod adapters;
 mod book;
+mod incoming;
 mod keys;
 mod loader;
+mod log;
+mod menu;
 mod platform;
 mod state;
 
+use adapters::{BOOK_CONTROL, BOOK_READ, Host};
 use book::Book;
 use keys::Keys;
 use loader::{Done, Loader, Scaled, Target};
+use serde_json::{Value, json};
 use softbuffer::{Context, Surface};
 use state::{BookState, Fit, State};
 use std::collections::HashMap;
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
@@ -29,19 +36,36 @@ use winit::window::{Fullscreen, Window, WindowId};
 static ALLOCATOR: platform::Allocator = platform::Allocator;
 
 const BACKGROUND: u32 = 0x1b1b1d;
-const PROGRESS: u32 = 0x5b6cff;
+/// Leaf green: the progress line, the drop outline and the icon.
+const ACCENT: u32 = 0x4fbf73;
 const BROKEN: u32 = 0x3a2224;
 /// The pages one key press away, decoded ahead so they turn instantly.
 const PREFETCH: [isize; 3] = [0, 1, -1];
 /// Wheel distance, in pixels, that turns a page in fit-page mode.
 const WHEEL_PAGE: f64 = 120.0;
+/// How long a message from an adapter (or Leaf) stays in the title bar.
+const NOTICE: Duration = Duration::from_secs(4);
+const HELP_URL: &str = "https://github.com/solacecasino/leaf#readme";
+
+/// Everything that wakes the UI thread.
+pub enum Event {
+    Page(Done),
+    /// Finder asked Leaf to open something (see incoming.rs).
+    Incoming,
+    Menu(String),
+    Adapter(adapters::Message),
+}
 
 fn main() {
-    let event_loop = EventLoop::<Done>::with_user_event().build().expect("create the event loop");
+    log::init();
+    let event_loop = EventLoop::<Event>::with_user_event().build().expect("create the event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = App::new(event_loop.create_proxy());
+    let proxy = event_loop.create_proxy();
+    let wake = proxy.clone();
+    incoming::listen_early(move || drop(wake.send_event(Event::Incoming)));
+    let mut app = App::new(proxy);
     if let Err(e) = event_loop.run_app(&mut app) {
-        eprintln!("leaf: {e}");
+        log::push("leaf", e.to_string());
     }
 }
 
@@ -58,14 +82,25 @@ struct Open {
 }
 
 struct App {
+    proxy: EventLoopProxy<Event>,
     state: State,
     keys: Keys,
     loader: Loader,
+    host: Host,
+    menu: Option<menu::MenuBar>,
     window: Option<Arc<Window>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
     open: Option<Open>,
     next_id: u64,
     problem: Option<String>,
+    notice: Option<(String, Instant)>,
+    /// A file is being dragged over the window.
+    hovering: bool,
+    last_drop: Option<Instant>,
+    /// Leaf is the active window. macOS also sends scrolling to inactive
+    /// windows under the pointer, which mustn't turn your page.
+    focused: bool,
+    quitting: bool,
     modifiers: ModifiersState,
     cursor: PhysicalPosition<f64>,
     wheel: f64,
@@ -74,19 +109,32 @@ struct App {
 }
 
 impl App {
-    fn new(proxy: EventLoopProxy<Done>) -> Self {
+    fn new(proxy: EventLoopProxy<Event>) -> Self {
         let state = state::load();
-        let (keys, problem) = Keys::load();
-        let pending = std::env::args_os().nth(1).map(PathBuf::from).or_else(|| state.last.clone());
+        let pages = proxy.clone();
+        let calls = proxy.clone();
+        let host = Host::new(move |m| drop(calls.send_event(Event::Adapter(m))));
+        let (keys, problem) = Keys::load(&adapter_keys(&host));
+        // macOS once passed a "-psn_…" argument to apps opened from Finder.
+        let arg = std::env::args_os().nth(1).filter(|a| !a.to_string_lossy().starts_with("-psn"));
+        let pending = arg.map(PathBuf::from).or_else(|| state.last.clone());
         let mut app = App {
+            proxy,
             state,
             keys,
-            loader: Loader::new(proxy),
+            loader: Loader::new(move |done| pages.send_event(Event::Page(done)).is_ok()),
+            host,
+            menu: None,
             window: None,
             surface: None,
             open: None,
             next_id: 0,
             problem,
+            notice: None,
+            hovering: false,
+            last_drop: None,
+            focused: true,
+            quitting: false,
             modifiers: ModifiersState::empty(),
             cursor: PhysicalPosition::default(),
             wheel: 0.0,
@@ -102,7 +150,17 @@ impl App {
     }
 
     fn open_path(&mut self, path: PathBuf) {
-        match Book::open(&path) {
+        if adapters::is_package(&path) {
+            self.install_adapter(&path);
+            return;
+        }
+        let opened = match self.host.reader_for(&path) {
+            Some(i) if Book::needs_adapter(&path) => {
+                self.host.start(i).and_then(|link| Book::through_adapter(&path, link)).map(|b| (b, None))
+            }
+            _ => Book::open(&path),
+        };
+        match opened {
             Ok((book, start)) => {
                 let key = book.path.to_string_lossy().into_owned();
                 let mut at = self.state.books.get(&key).cloned().unwrap_or_default();
@@ -111,8 +169,9 @@ impl App {
                     at.scroll = 0.0;
                 }
                 at.page = at.page.min(book.pages.len() - 1);
-                self.state.last = Some(book.path.clone());
+                self.state.opened(&book.path);
                 self.next_id += 1;
+                self.host.emit("opened", json!({ "path": book.path, "name": book.name, "pages": book.pages.len() }));
                 self.open = Some(Open {
                     id: self.next_id,
                     book: Arc::new(book),
@@ -124,13 +183,57 @@ impl App {
                 });
                 self.problem = None;
                 self.moved();
+                self.rebuild_menu();
             }
             Err(e) => {
+                log::push("leaf", &e);
                 self.problem = Some(e);
                 self.update_title();
                 self.redraw();
             }
         }
+    }
+
+    fn install_adapter(&mut self, path: &Path) {
+        let manifest = match adapters::package_manifest(path) {
+            Ok(m) => m,
+            Err(e) => return self.say(e),
+        };
+        let text = format!("Install {}?\n\n{}", manifest.name, adapters::summary(&manifest));
+        if !platform::confirm("Install adapter?", &text, "Install", "Cancel") {
+            return;
+        }
+        match adapters::install(path) {
+            Ok(m) => {
+                adapters::remember_approval(&m);
+                self.reload_adapters();
+                self.say(format!("Installed {} {}", m.name, m.version));
+            }
+            Err(e) => self.say(e),
+        }
+    }
+
+    fn reload_adapters(&mut self) {
+        // A book read through an adapter is reopened on the restarted one.
+        let reopen = self.open.as_ref().filter(|o| o.book.adapter().is_some()).map(|o| o.book.path.clone());
+        self.remember();
+        self.host.reload();
+        let (keys, problem) = Keys::load(&adapter_keys(&self.host));
+        self.keys = keys;
+        self.problem = problem;
+        self.host.start_launch_adapters();
+        match reopen {
+            Some(path) => self.open_path(path),
+            None => self.rebuild_menu(),
+        }
+    }
+
+    /// Shows a short message in the title bar, and logs it.
+    fn say(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        log::push("leaf", &text);
+        self.notice = Some((text, Instant::now() + NOTICE));
+        self.update_title();
     }
 
     /// After any change of page or setting: remember it, ask for pages, redraw.
@@ -140,12 +243,34 @@ impl App {
         self.update_title();
         self.request_pages();
         self.redraw();
+        if let Some(o) = &self.open {
+            self.host.emit("page", json!({ "page": o.at.page, "pages": o.book.pages.len() }));
+            if let Some(m) = &self.menu {
+                m.sync(true, o.at.rtl, o.at.fit == Fit::Width);
+            }
+        }
     }
 
     fn remember(&mut self) {
         if let Some(o) = &self.open {
             self.state.books.insert(o.key.clone(), o.at.clone());
         }
+    }
+
+    fn rebuild_menu(&mut self) {
+        if self.window.is_none() {
+            return;
+        }
+        let proxy = self.proxy.clone();
+        let content = menu::Content {
+            keys: &self.keys,
+            adapters: &self.host.all,
+            recent: &self.state.recent,
+            has_book: self.open.is_some(),
+            rtl: self.open.as_ref().is_some_and(|o| o.at.rtl),
+            fit_width: self.open.as_ref().is_some_and(|o| o.at.fit == Fit::Width),
+        };
+        self.menu = Some(menu::MenuBar::install(&content, move |id| drop(proxy.send_event(Event::Menu(id)))));
     }
 
     fn update_title(&self) {
@@ -161,10 +286,14 @@ impl App {
                 }
                 t
             }
-            None => "Leaf — drop a book here, or press ⌘O".replace('⌘', if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" }),
+            None if cfg!(target_os = "macos") => "Leaf — drop a book here, or press ⌘O".into(),
+            None => "Leaf — drop a book here, or press Ctrl+O".into(),
         };
         if let Some(problem) = &self.problem {
             title.push_str(&format!("  ·  {problem}"));
+        }
+        if let Some((notice, _)) = &self.notice {
+            title.push_str(&format!("  ·  {notice}"));
         }
         window.set_title(&title);
     }
@@ -270,7 +399,20 @@ impl App {
         }
     }
 
+    /// Runs a named command, from a key, a menu or an adapter.
     fn run(&mut self, command: &str) {
+        if let Some((name, id)) = adapters::parse_command(command) {
+            if let Err(e) = self.host.run_command(&name, &id) {
+                self.say(e);
+            }
+            return;
+        }
+        if let Some(i) = command.strip_prefix("open-recent ").and_then(|i| i.parse::<usize>().ok()) {
+            if let Some(path) = self.state.recent.get(i).cloned() {
+                self.open_path(path);
+            }
+            return;
+        }
         let rtl = self.open.as_ref().is_some_and(|o| o.at.rtl);
         match command {
             "next" => self.step(true),
@@ -324,7 +466,81 @@ impl App {
                     self.open_path(path);
                 }
             }
+            "close-book" => {
+                self.remember();
+                self.open = None;
+                self.state.last = None;
+                state::save(&self.state);
+                self.update_title();
+                self.redraw();
+                self.rebuild_menu();
+            }
+            "quit" => self.quitting = true,
+            "open-config-folder" => platform::open(&state::dir(), false),
+            "show-adapters-folder" => {
+                let dir = adapters::adapters_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                platform::open(&dir, false);
+            }
+            "reload-adapters" => {
+                self.reload_adapters();
+                let n = self.host.all.len();
+                self.say(format!("{n} adapter{}", if n == 1 { "" } else { "s" }));
+            }
+            "show-log" => platform::open(&log::path(), true),
+            "edit-keys" => platform::open(&state::dir().join("keys.toml"), true),
+            "help" => platform::open_url(HELP_URL),
             _ => {}
+        }
+    }
+
+    /// A message from an adapter. Requests are answered; a refused or
+    /// unknown one gets an error back instead of being ignored.
+    fn adapter_call(&mut self, adapter: String, id: Option<Value>, method: String, params: Value) {
+        let allowed = |permission: &str| {
+            if self.host.has(&adapter, permission) {
+                Ok(())
+            } else {
+                Err(format!("{method} needs the {permission} permission"))
+            }
+        };
+        let result: Result<Value, String> = match method.as_str() {
+            "book.get" => allowed(BOOK_READ).map(|()| match &self.open {
+                Some(o) => json!({
+                    "path": o.book.path, "name": o.book.name, "page": o.at.page,
+                    "pages": o.book.pages.len(), "rtl": o.at.rtl,
+                    "fit": if o.at.fit == Fit::Width { "width" } else { "page" },
+                }),
+                None => Value::Null,
+            }),
+            "book.goto" => allowed(BOOK_CONTROL).and_then(|()| {
+                let page = params["page"].as_u64().ok_or("book.goto needs a `page` number")?;
+                self.go(page as usize, 0.0);
+                Ok(Value::Null)
+            }),
+            "book.open" => allowed(BOOK_CONTROL).and_then(|()| {
+                let path = params["path"].as_str().ok_or("book.open needs a `path`")?;
+                self.open_path(path.into());
+                Ok(Value::Null)
+            }),
+            "notify" => {
+                self.say(format!("{adapter}: {}", params["text"].as_str().unwrap_or_default()));
+                Ok(Value::Null)
+            }
+            "log" => {
+                log::push(&adapter, params["message"].as_str().unwrap_or_default());
+                Ok(Value::Null)
+            }
+            "ui.confirm" => {
+                let title = params["title"].as_str().unwrap_or(&adapter);
+                Ok(json!(platform::confirm(title, params["message"].as_str().unwrap_or_default(), "Yes", "No")))
+            }
+            other => Err(format!("Leaf doesn't know the method {other}")),
+        };
+        match (id, result) {
+            (Some(id), result) => self.host.reply(&adapter, id, result),
+            (None, Err(e)) => log::push(&adapter, e),
+            (None, Ok(_)) => {}
         }
     }
 
@@ -334,6 +550,7 @@ impl App {
         let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
         let scroll_range = self.scroll_range();
         let current = self.current().cloned();
+        let hovering = self.hovering;
         let open = self.open.as_ref();
         let Some(surface) = &mut self.surface else { return };
         if surface.resize(w, h).is_err() {
@@ -341,6 +558,7 @@ impl App {
         }
         let Ok(mut buf) = surface.buffer_mut() else { return };
         let (w, h) = (size.width as i64, size.height as i64);
+        let thick = (window.scale_factor() * 2.0).round().max(1.0) as i64;
         buf.fill(BACKGROUND);
 
         if let Some(img) = &current {
@@ -370,11 +588,25 @@ impl App {
         if let Some(o) = open {
             let n = o.book.pages.len() as i64;
             let filled = w * (o.at.page as i64 + 1) / n;
-            let thick = (window.scale_factor() * 2.0).round().max(1.0) as i64;
             for y in (h - thick).max(0)..h {
                 let row = (y * w) as usize;
                 let (a, b) = if o.at.rtl { (w - filled, w) } else { (0, filled) };
-                buf[row + a as usize..row + b as usize].fill(PROGRESS);
+                buf[row + a as usize..row + b as usize].fill(ACCENT);
+            }
+        }
+
+        // While something is dragged over the window: an outline, so you can
+        // see it'll be taken.
+        if hovering {
+            let edge = thick * 2;
+            for y in 0..h {
+                let row = (y * w) as usize;
+                if y < edge || y >= h - edge {
+                    buf[row..row + w as usize].fill(ACCENT);
+                } else {
+                    buf[row..row + edge as usize].fill(ACCENT);
+                    buf[row + (w - edge) as usize..row + w as usize].fill(ACCENT);
+                }
             }
         }
         window.pre_present_notify();
@@ -399,11 +631,31 @@ impl App {
         self.remember();
         self.note_window();
         state::save(&self.state);
+        self.host.stop_all();
         event_loop.exit();
+    }
+
+    fn open_incoming(&mut self) {
+        for path in incoming::take() {
+            self.open_path(path);
+        }
     }
 }
 
-impl ApplicationHandler<Done> for App {
+/// Adapters' default keys, for the key map.
+fn adapter_keys(host: &Host) -> Vec<(String, String)> {
+    host.all
+        .iter()
+        .flat_map(|a| {
+            a.manifest
+                .commands
+                .iter()
+                .filter_map(|c| Some((c.keys.clone()?, adapters::command_name(&a.manifest.name, &c.id))))
+        })
+        .collect()
+}
+
+impl ApplicationHandler<Event> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -416,27 +668,67 @@ impl ApplicationHandler<Done> for App {
         if self.note_window() {
             state::save(&self.state);
         }
+        incoming::listen();
+        self.rebuild_menu();
         self.update_title();
         self.request_pages();
         self.redraw();
+        self.host.start_launch_adapters();
+        self.open_incoming();
     }
 
-    fn user_event(&mut self, _: &ActiveEventLoop, done: Done) {
-        let Some(o) = &mut self.open else { return };
-        if done.book != o.id || done.target != o.target {
-            return;
+    fn user_event(&mut self, _: &ActiveEventLoop, event: Event) {
+        match event {
+            Event::Page(done) => {
+                let Some(o) = &mut self.open else { return };
+                if done.book != o.id || done.target != o.target {
+                    return;
+                }
+                let is_current = done.page == o.at.page;
+                if is_current && std::env::var_os("LEAF_TIMING").is_some() {
+                    eprintln!("leaf: page {} on screen {:?} after start", done.page + 1, self.started.elapsed());
+                }
+                if is_current && done.image.is_ok() {
+                    o.stale = None;
+                }
+                o.cache.insert(done.page, done.image);
+                if is_current {
+                    self.update_title();
+                    self.redraw();
+                }
+            }
+            Event::Incoming => self.open_incoming(),
+            Event::Menu(id) => {
+                if let Some(command) = self.menu.as_ref().and_then(|m| m.command(&id)) {
+                    self.run(&command);
+                }
+            }
+            Event::Adapter(adapters::Message::Call { adapter, id, method, params }) => {
+                self.adapter_call(adapter, id, method, params)
+            }
+            Event::Adapter(adapters::Message::Stopped { adapter, generation }) => {
+                let crashed = self.host.stopped(&adapter, generation);
+                if crashed && self.open.as_ref().is_some_and(|o| o.book.adapter() == Some(adapter.as_str())) {
+                    self.problem = Some(format!("{adapter} stopped; open the book again to keep reading"));
+                    self.update_title();
+                }
+            }
         }
-        let is_current = done.page == o.at.page;
-        if is_current && std::env::var_os("LEAF_TIMING").is_some() {
-            eprintln!("leaf: page {} on screen {:?} after start", done.page + 1, self.started.elapsed());
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.quitting {
+            return self.quit(event_loop);
         }
-        if is_current && done.image.is_ok() {
-            o.stale = None;
-        }
-        o.cache.insert(done.page, done.image);
-        if is_current {
-            self.update_title();
-            self.redraw();
+        // Clear an expired title-bar message, and otherwise sleep until it expires.
+        match self.notice.as_ref().map(|(_, until)| *until) {
+            Some(until) if until <= Instant::now() => {
+                self.notice = None;
+                self.update_title();
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+            Some(until) => event_loop.set_control_flow(ControlFlow::WaitUntil(until)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 
@@ -449,7 +741,23 @@ impl ApplicationHandler<Done> for App {
                 self.redraw();
             }
             WindowEvent::RedrawRequested => self.draw(),
-            WindowEvent::DroppedFile(path) => self.open_path(path),
+            WindowEvent::HoveredFile(_) => {
+                self.hovering = true;
+                self.redraw();
+            }
+            WindowEvent::HoveredFileCancelled => {
+                self.hovering = false;
+                self.redraw();
+            }
+            WindowEvent::DroppedFile(path) => {
+                self.hovering = false;
+                // Several files dropped at once arrive one by one: open the first.
+                if self.last_drop.is_some_and(|t| t.elapsed() < Duration::from_millis(300)) {
+                    return;
+                }
+                self.last_drop = Some(Instant::now());
+                self.open_path(path);
+            }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let mods = self.modifiers;
@@ -478,6 +786,9 @@ impl ApplicationHandler<Done> for App {
                 }
                 // Fit-page: wheel turns pages, with a pause so trackpad
                 // momentum doesn't flick through several at once.
+                if !self.focused {
+                    return;
+                }
                 if self.wheel_turned.is_some_and(|t| t.elapsed() < Duration::from_millis(300)) {
                     return;
                 }
@@ -489,9 +800,13 @@ impl ApplicationHandler<Done> for App {
                     self.step(forward);
                 }
             }
-            WindowEvent::Focused(false) => {
-                self.remember();
-                state::save(&self.state);
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                self.wheel = 0.0;
+                if !focused {
+                    self.remember();
+                    state::save(&self.state);
+                }
             }
             _ => {}
         }
