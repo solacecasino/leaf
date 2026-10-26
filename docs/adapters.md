@@ -15,7 +15,8 @@ An adapter can:
 - **follow along**: be told when a book opens or the page changes, and ask
   Leaf which book is open or to turn the page.
 
-There are no adapters yet. This is the infrastructure for them.
+There are no adapters yet. Leaf reads most formats itself now (RAR, 7-Zip,
+PDF, EPUB, text), so adapters are for the rest, and for adding commands.
 
 ## Installing
 
@@ -97,7 +98,7 @@ Every message is one JSON object on one line, in UTF-8.
 
 | Method | Params | Notes |
 |---|---|---|
-| `initialize` | `leaf` (version), `protocol` (currently `1`), `permissions` | Notification, right after starting |
+| `initialize` | `leaf` (version), `protocol` (currently `2`), `permissions` | Notification, right after starting |
 | `command` | `command`: the command's `id` | Notification: you picked one of its commands |
 | `event` | `kind` plus fields below | Notification, if listed in `events` and you have `book.read` |
 | `shutdown` | | Notification: exit soon |
@@ -118,7 +119,7 @@ Events:
 
 | Method | Params | Result | Permission |
 |---|---|---|---|
-| `book.get` | | `{ path, name, page, pages, rtl, fit }`, or `null` with no book open | `book.read` |
+| `book.get` | | `{ path, name, page, pages, rtl, fit, mode }`, or `null` with no book open. `mode` is `comic`, `manga` or `webtoon` | `book.read` |
 | `book.goto` | `page` (from 0) | `null` | `book.control` |
 | `book.open` | `path` | `null` | `book.control` |
 | `notify` | `text` | `null`. Shows a short message in the title bar | none |
@@ -128,7 +129,7 @@ Events:
 ## Example exchange
 
 ```
-→ {"method":"initialize","params":{"leaf":"0.0.1","protocol":1,"permissions":[]}}
+→ {"method":"initialize","params":{"leaf":"0.0.2","protocol":2,"permissions":[]}}
 → {"id":1,"method":"book.open","params":{"path":"/Users/me/One Piece 01.cbr"}}
 ← {"id":1,"result":{"pages":["001.jpg","002.jpg"],"name":"One Piece 01"}}
 → {"id":2,"method":"book.page","params":{"path":"/Users/me/One Piece 01.cbr","page":0,"name":"001.jpg"}}
@@ -143,3 +144,9 @@ Events:
 things, so an adapter written for an older version keeps working.
 
 - **1** (Leaf 0.0.1): commands, events, opening books.
+- **2** (Leaf 0.0.2): `mode` in `book.get`. An adapter made for version 1
+  works unchanged.
+
+Leaf 0.0.2 also refuses adapters whose program was built for another kind of
+computer, ignores (and logs) any message over 96 MB, and moves a removed
+adapter to the Trash.

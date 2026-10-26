@@ -1,5 +1,6 @@
-//! Makes a demo comic to try Leaf with: `cargo run --example sample`
-//! writes samples/Demo Manga.cbz, 24 numbered pages.
+//! Makes demo books to try Leaf with: `cargo run --example sample` writes
+//! samples/Demo Comic.cbz (colour), Demo Manga.cbz (black and white) and
+//! Demo Webtoon.cbz (tall strips), so each reading mode can be seen.
 
 use image::{Rgb, RgbImage};
 use std::io::{Cursor, Write};
@@ -35,42 +36,71 @@ fn digit(img: &mut RgbImage, d: usize, x: u32, y: u32, s: u32, c: Rgb<u8>) {
     }
 }
 
-fn main() {
-    std::fs::create_dir_all("samples").unwrap();
-    let file = std::fs::File::create("samples/Demo Manga.cbz").unwrap();
-    let mut zip = zip::ZipWriter::new(file);
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Comic,
+    Manga,
+    Webtoon,
+}
+
+/// One numbered page. Comics are in colour, manga in black and white,
+/// webtoons are tall strips.
+fn page(kind: Kind, n: usize, of: usize) -> RgbImage {
+    let (w, h) = match kind {
+        Kind::Webtoon => (800u32, 2400u32),
+        _ => (1200u32, 1700u32),
+    };
+    let hue = n as f32 / of as f32;
+    let mut img = RgbImage::from_fn(w, h, |_, y| {
+        let t = y as f32 / h as f32;
+        match kind {
+            Kind::Manga => {
+                let v = (245.0 - 30.0 * t) as u8;
+                Rgb([v, v, v])
+            }
+            _ => Rgb([(250.0 - 150.0 * t * hue) as u8, (200.0 + 40.0 * t) as u8, (120.0 + 120.0 * (1.0 - hue)) as u8]),
+        }
+    });
+    let ink = Rgb([30, 30, 34]);
+    let panels: &[(u32, u32, u32, u32)] = match kind {
+        Kind::Webtoon => &[(60, 200, 680, 900), (60, 1300, 680, 900)],
+        _ => &[(60, 60, 1080, 520), (60, 620, 520, 1020), (620, 620, 520, 480), (620, 1140, 520, 500)],
+    };
+    for &(x, y, pw, ph) in panels {
+        rect(&mut img, x, y, pw, 8, ink);
+        rect(&mut img, x, y + ph - 8, pw, 8, ink);
+        rect(&mut img, x, y, 8, ph, ink);
+        rect(&mut img, x + pw - 8, y, 8, ph, ink);
+    }
+    // The page number, large, near the top.
+    let s = 160;
+    let text = n.to_string();
+    let total = text.len() as u32 * (s + 50) - 50;
+    let colour = if kind == Kind::Manga { ink } else { Rgb([200, 40, 60]) };
+    for (i, ch) in text.chars().enumerate() {
+        let d = ch.to_digit(10).unwrap() as usize;
+        digit(&mut img, d, (w - total) / 2 + i as u32 * (s + 50), 240, s, colour);
+    }
+    img
+}
+
+fn book(name: &str, kind: Kind, pages: usize) {
+    let path = format!("samples/{name}.cbz");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    let (w, h) = (1200u32, 1700u32);
-    for page in 1..=24usize {
-        let hue = page as f32 / 24.0;
-        let mut img = RgbImage::from_fn(w, h, |_, y| {
-            let t = y as f32 / h as f32;
-            let r = (240.0 - 60.0 * t * hue) as u8;
-            let g = (235.0 - 40.0 * t) as u8;
-            let b = (225.0 - 50.0 * t * (1.0 - hue)) as u8;
-            Rgb([r, g, b])
-        });
-        let ink = Rgb([30, 30, 34]);
-        // Manga-style panel borders.
-        for (x, y, pw, ph) in [(60, 60, 1080, 520), (60, 620, 520, 1020), (620, 620, 520, 480), (620, 1140, 520, 500)] {
-            rect(&mut img, x, y, pw, 8, ink);
-            rect(&mut img, x, y + ph - 8, pw, 8, ink);
-            rect(&mut img, x, y, 8, ph, ink);
-            rect(&mut img, x + pw - 8, y, 8, ph, ink);
-        }
-        // The page number, large, in the top panel.
-        let s = 160;
-        let text = page.to_string();
-        let total = text.len() as u32 * (s + 50) - 50;
-        for (i, ch) in text.chars().enumerate() {
-            let d = ch.to_digit(10).unwrap() as usize;
-            digit(&mut img, d, (w - total) / 2 + i as u32 * (s + 50), 160, s, Rgb([200, 40, 60]));
-        }
+    for n in 1..=pages {
         let mut png = Vec::new();
-        img.write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
-        zip.start_file(format!("Chapter 1/page{page}.png"), opts).unwrap();
+        page(kind, n, pages).write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        zip.start_file(format!("Chapter 1/page{n}.png"), opts).unwrap();
         zip.write_all(&png).unwrap();
     }
     zip.finish().unwrap();
-    println!("wrote samples/Demo Manga.cbz");
+    println!("wrote {path}");
+}
+
+fn main() {
+    std::fs::create_dir_all("samples").unwrap();
+    book("Demo Comic", Kind::Comic, 24);
+    book("Demo Manga", Kind::Manga, 24);
+    book("Demo Webtoon", Kind::Webtoon, 30);
 }

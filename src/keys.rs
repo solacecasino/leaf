@@ -21,6 +21,11 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("backspace", "prev"),
     ("home", "first"),
     ("end", "last"),
+    ("1", "mode-comic"),
+    ("2", "mode-manga"),
+    ("3", "mode-webtoon"),
+    ("d", "toggle-spreads"),
+    ("p", "pair-cover"),
     ("m", "toggle-rtl"),
     ("w", "toggle-fit"),
     ("f", "fullscreen"),
@@ -36,7 +41,8 @@ const DEFAULTS: &[(&str, &str)] = &[
 ];
 
 pub const COMMANDS: &[&str] = &[
-    "next", "prev", "page-right", "page-left", "first", "last", "toggle-rtl", "toggle-fit",
+    "next", "prev", "page-right", "page-left", "first", "last", "mode-comic", "mode-manga", "mode-webtoon",
+    "toggle-spreads", "pair-cover", "toggle-rtl", "toggle-fit", "copy-debug-info",
     "fullscreen", "leave-fullscreen", "open-file", "open-folder", "close-book", "quit",
     "open-config-folder", "show-adapters-folder", "reload-adapters", "show-log", "edit-keys", "help", "none",
 ];
@@ -52,11 +58,17 @@ const EXAMPLE: &str = r#"# Leaf key bindings. Lines here add to or replace the b
 #   next, prev            the next/previous screen (scrolls first in fit-width)
 #   page-right, page-left  turn toward that side (respects right-to-left)
 #   first, last
-#   toggle-rtl            manga (right-to-left) reading
+#   mode-comic            one page, left to right
+#   mode-manga            two pages, right to left
+#   mode-webtoon          one long strip, scrolled down
+#   toggle-spreads        two pages side by side, or one
+#   pair-cover            pair the cover with page 2 (when spreads are off by one)
+#   toggle-rtl            right-to-left reading
 #   toggle-fit            fit the whole page or fit the width
 #   fullscreen, leave-fullscreen
 #   open-file, open-folder, close-book, quit
-#   open-config-folder, show-adapters-folder, reload-adapters, show-log, edit-keys, help
+#   open-config-folder, show-adapters-folder, reload-adapters, show-log,
+#   copy-debug-info, edit-keys, help
 #   adapter "Name" id     an adapter's command
 #   none                  unbind a built-in key
 #

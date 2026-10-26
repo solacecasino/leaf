@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The protocol version sent in `initialize`. New versions only add things.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 pub const BOOK_READ: &str = "book.read";
 pub const BOOK_CONTROL: &str = "book.control";
@@ -237,8 +237,16 @@ impl Host {
         }
         let (reader_link, send, name) = (link.clone(), self.send.clone(), manifest.name.clone());
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
+            let mut stdout = BufReader::new(stdout);
+            loop {
+                let line = match read_message(&mut stdout) {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(e) => {
+                        crate::log::push(&name, e);
+                        continue;
+                    }
+                };
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -347,6 +355,69 @@ impl Drop for Host {
     }
 }
 
+/// The longest message Leaf reads from an adapter: room for a big page as
+/// base64, but not for one that would exhaust memory.
+const MAX_MESSAGE: u64 = 96 << 20;
+
+/// Reads one line, refusing (and skipping) one longer than MAX_MESSAGE.
+/// None at the end of the output.
+fn read_message(r: &mut impl BufRead) -> Result<Option<String>, String> {
+    let mut buf = Vec::new();
+    let n = r.by_ref().take(MAX_MESSAGE).read_until(b'\n', &mut buf).map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if buf.last() != Some(&b'\n') && n as u64 == MAX_MESSAGE {
+        // Throw the rest of the line away, a piece at a time.
+        loop {
+            buf.clear();
+            let n = r.by_ref().take(1 << 20).read_until(b'\n', &mut buf).map_err(|e| e.to_string())?;
+            if n == 0 || buf.last() == Some(&b'\n') {
+                break;
+            }
+        }
+        return Err(format!("sent a message over {} MB; it was ignored", MAX_MESSAGE >> 20));
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+}
+
+/// Refuses an adapter whose program was built for another kind of computer,
+/// with a message saying so, instead of failing to start later.
+pub fn check_platform(dir: &Path, manifest: &Manifest) -> Result<(), String> {
+    let Some(program) = manifest.run.first().filter(|p| p.contains(['/', '\\'])) else {
+        return Ok(()); // a script run by an interpreter, or a program in PATH
+    };
+    let path = dir.join(program);
+    let mut magic = [0u8; 20];
+    let n = std::fs::File::open(&path)
+        .and_then(|mut f| f.read(&mut magic))
+        .map_err(|_| format!("{} is missing its program ({program})", manifest.name))?;
+    let magic = &magic[..n];
+    let built_for = if magic.starts_with(b"MZ") {
+        "Windows"
+    } else if magic.starts_with(b"\x7fELF") {
+        "Linux"
+    } else if magic.starts_with(&[0xcf, 0xfa, 0xed, 0xfe]) || magic.starts_with(&[0xca, 0xfe, 0xba, 0xbe]) {
+        // A thin Mach-O names its processor; Apple Silicon runs Intel ones too.
+        let arm_only = magic.starts_with(&[0xcf, 0xfa, 0xed, 0xfe]) && magic.get(4..8) == Some(&[0x0c, 0x00, 0x00, 0x01]);
+        if arm_only && cfg!(target_arch = "x86_64") { "Apple Silicon Macs" } else { "macOS" }
+    } else {
+        return Ok(()); // a script; let it try
+    };
+    let ours = if cfg!(target_os = "macos") {
+        "macOS"
+    } else if cfg!(windows) {
+        "Windows"
+    } else {
+        "Linux"
+    };
+    if built_for == ours {
+        Ok(())
+    } else {
+        Err(format!("{} is built for {built_for}, not this computer. Look for its {ours} version.", manifest.name))
+    }
+}
+
 /// Starts the program in the adapter's folder. A program given as a path
 /// (`./unrar-pages`) is found there.
 fn spawn(dir: &Path, run: &[String]) -> Result<Child, String> {
@@ -386,7 +457,7 @@ fn discover_in(root: &Path) -> Vec<Adapter> {
     dirs.sort();
     let mut found: Vec<Adapter> = Vec::new();
     for dir in dirs {
-        match load_manifest(&dir) {
+        match load_manifest(&dir).and_then(|m| check_platform(&dir, &m).map(|()| m)) {
             Ok(manifest) => {
                 found.retain(|a| a.manifest.name != manifest.name);
                 found.push(Adapter { dir, manifest, running: None });
@@ -462,7 +533,7 @@ fn install_into(source: &Path, root: &Path) -> Result<Manifest, String> {
     let incoming = root.join(format!(".incoming-{folder}"));
     let _ = std::fs::remove_dir_all(&incoming);
     let result = if source.is_dir() { copy_dir(source, &incoming).map_err(|e| e.to_string()) } else { unzip(source, &incoming) };
-    if let Err(e) = result {
+    if let Err(e) = result.and_then(|()| check_platform(&incoming, &manifest)) {
         let _ = std::fs::remove_dir_all(&incoming);
         return Err(format!("Couldn't install {}: {e}", manifest.name));
     }
@@ -576,6 +647,14 @@ pub fn remember_approval(m: &Manifest) {
     let mut approvals = load_approvals();
     approvals.insert(m.name.clone(), m.permissions.clone());
     let _ = std::fs::write(approvals_path(), serde_json::to_string_pretty(&approvals).expect("serializes"));
+}
+
+/// Forgets an approval, for a removed adapter: if it comes back, it's asked about again.
+pub fn forget_approval(name: &str) {
+    let mut approvals = load_approvals();
+    if approvals.remove(name).is_some() {
+        let _ = std::fs::write(approvals_path(), serde_json::to_string_pretty(&approvals).expect("serializes"));
+    }
 }
 
 /// Asks the user with a native dialog, remembering a yes in approvals.json
@@ -731,6 +810,46 @@ done
         install_into(&zip_path, &dest).unwrap();
         assert_eq!(discover_in(&dest).len(), 1);
         assert!(!is_package(&root));
+    }
+
+    #[test]
+    fn refuses_programs_for_other_computers() {
+        let dir = temp("platform");
+        let m = |run: &str| Manifest {
+            name: "X".into(),
+            version: String::new(),
+            author: String::new(),
+            license: String::new(),
+            description: String::new(),
+            homepage: String::new(),
+            run: vec![run.into()],
+            permissions: Vec::new(),
+            start: Start::Command,
+            events: Vec::new(),
+            commands: Vec::new(),
+            opens: Vec::new(),
+        };
+        std::fs::write(dir.join("win.exe"), b"MZ\x90\x00").unwrap();
+        std::fs::write(dir.join("linux"), b"\x7fELF\x02\x01").unwrap();
+        std::fs::write(dir.join("script.sh"), b"#!/bin/sh").unwrap();
+        assert!(check_platform(&dir, &m("./win.exe")).unwrap_err().contains("Windows"));
+        assert!(check_platform(&dir, &m("./linux")).unwrap_err().contains("Linux"));
+        assert!(check_platform(&dir, &m("./script.sh")).is_ok());
+        assert!(check_platform(&dir, &m("python3")).is_ok());
+        assert!(check_platform(&dir, &m("./missing")).is_err());
+        let own = std::env::current_exe().unwrap();
+        std::fs::copy(&own, dir.join("native")).unwrap();
+        assert!(check_platform(&dir, &m("./native")).is_ok());
+    }
+
+    #[test]
+    fn long_messages_are_refused_not_kept() {
+        let mut big = vec![b'x'; (MAX_MESSAGE + 10) as usize];
+        big.extend_from_slice(b"\n{\"method\":\"log\"}\n");
+        let mut r = std::io::Cursor::new(big);
+        assert!(read_message(&mut r).is_err());
+        assert_eq!(read_message(&mut r).unwrap().unwrap().trim(), "{\"method\":\"log\"}");
+        assert_eq!(read_message(&mut r).unwrap(), None);
     }
 
     #[test]

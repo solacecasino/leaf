@@ -6,12 +6,24 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Fit {
     #[default]
     Page,
     Width,
+}
+
+/// How a book is read.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// One page at a time, left to right.
+    Comic,
+    /// Two pages side by side, right to left.
+    Manga,
+    /// One long strip, scrolled down.
+    Webtoon,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -21,9 +33,22 @@ pub struct BookState {
     pub rtl: bool,
     #[serde(default)]
     pub fit: Fit,
-    /// How far down the page, 0.0 (top) to 1.0 (bottom), in fit-width mode.
+    /// How far down the page, 0.0 (top) to 1.0 (bottom), in fit-width and
+    /// webtoon mode.
     #[serde(default)]
     pub scroll: f32,
+    /// How the book is read; None until Leaf has looked at it.
+    #[serde(default)]
+    pub mode: Option<Mode>,
+    /// The mode was picked by hand, so Leaf doesn't second-guess it.
+    #[serde(default)]
+    pub chosen: bool,
+    /// Two pages side by side; None follows the mode.
+    #[serde(default)]
+    pub spreads: Option<bool>,
+    /// Pairs start with the cover instead of after it.
+    #[serde(default)]
+    pub pair_cover: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -98,5 +123,21 @@ pub fn save(state: &State) {
     let Ok(text) = serde_json::to_string_pretty(state) else { return };
     if fs::write(&tmp, text).is_ok() {
         let _ = fs::rename(&tmp, dir.join("state.json"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A state.json from Leaf 0.0.1 still loads, with the new fields empty.
+    #[test]
+    fn reads_older_state() {
+        let old = r#"{"last":"/b.cbz","books":{"/b.cbz":{"page":7,"rtl":true,"fit":"page","scroll":0.0}},"recent":["/b.cbz"],"window":[700,950],"scale":2.0}"#;
+        let s: State = serde_json::from_str(old).unwrap();
+        let b = &s.books["/b.cbz"];
+        assert_eq!((b.page, b.rtl, b.mode, b.chosen, b.spreads), (7, true, None, false, None));
+        let prototype = r#"{"last":"/b.cbz","books":{"/b.cbz":{"page":3}}}"#;
+        assert_eq!(serde_json::from_str::<State>(prototype).unwrap().books["/b.cbz"].page, 3);
     }
 }

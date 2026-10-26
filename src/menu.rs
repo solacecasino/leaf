@@ -8,6 +8,7 @@
 
 use crate::adapters::{Adapter, command_name};
 use crate::keys::Keys;
+use crate::state::Mode;
 use std::path::PathBuf;
 
 /// What the menus show besides the fixed commands.
@@ -15,7 +16,16 @@ pub struct Content<'a> {
     pub keys: &'a Keys,
     pub adapters: &'a [Adapter],
     pub recent: &'a [PathBuf],
+    pub view: View,
+}
+
+/// The open book's settings, for the View menu's checkmarks.
+#[derive(Default, Clone, Copy)]
+pub struct View {
     pub has_book: bool,
+    pub mode: Option<Mode>,
+    pub spreads: bool,
+    pub pair_cover: bool,
     pub rtl: bool,
     pub fit_width: bool,
 }
@@ -26,8 +36,13 @@ fn label(command: &str) -> &'static str {
         "open-file" => "Open…",
         "open-folder" => "Open Folder…",
         "close-book" => "Close Book",
+        "mode-comic" => "Comic",
+        "mode-manga" => "Manga",
+        "mode-webtoon" => "Webtoon",
+        "toggle-spreads" => "Two Pages",
+        "pair-cover" => "Pair the Cover",
         "toggle-fit" => "Fit Width",
-        "toggle-rtl" => "Right to Left (Manga)",
+        "toggle-rtl" => "Right to Left",
         "fullscreen" => "Toggle Full Screen",
         "next" => "Next Page",
         "prev" => "Previous Page",
@@ -40,6 +55,7 @@ fn label(command: &str) -> &'static str {
         "show-adapters-folder" => "Show Adapters Folder",
         "reload-adapters" => "Reload Adapters",
         "show-log" => "Show Log",
+        "copy-debug-info" => "Copy Debug Info",
         "help" => "Leaf Help",
         "quit" => "Quit Leaf",
         _ => "",
@@ -51,7 +67,7 @@ pub use mac::MenuBar;
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use super::{Content, command_name, label};
+    use super::{Content, Mode, View, command_name, label};
     use muda::accelerator::Accelerator;
     use muda::{AboutMetadataBuilder, CheckMenuItem, Icon, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
     use std::sync::OnceLock;
@@ -60,8 +76,8 @@ mod mac {
         _menu: Menu,
         /// Menu item ids are indexes into this list.
         commands: Vec<String>,
-        fit: Option<CheckMenuItem>,
-        rtl: Option<CheckMenuItem>,
+        /// The View menu's checkmarks, by command.
+        checks: Vec<(String, CheckMenuItem)>,
     }
 
     static HANDLER: OnceLock<()> = OnceLock::new();
@@ -121,7 +137,7 @@ mod mac {
         /// command of each item chosen; it's called on the main thread.
         pub fn install(content: &Content<'_>, send: impl Fn(String) + Send + Sync + 'static) -> Self {
             let mut b = Builder { content, commands: Vec::new() };
-            let book = content.has_book;
+            let book = content.view.has_book;
             let menu = Menu::new();
             let sep = PredefinedMenuItem::separator;
 
@@ -153,9 +169,21 @@ mod mac {
             b.adapter_items(&file, "file");
 
             let view = Submenu::new("View", true);
-            let fit = b.check("toggle-fit", content.fit_width, book);
-            let rtl = b.check("toggle-rtl", content.rtl, book);
-            view.append_items(&[&fit, &rtl, &sep(), &b.builtin("fullscreen", true)]).expect("menu builds");
+            let checks: Vec<(String, CheckMenuItem)> = CHECKS.iter().map(|c| (c.to_string(), b.check(c, checked(&content.view, c), book))).collect();
+            let item = |c: &str| &checks.iter().find(|(name, _)| name == c).expect("listed").1;
+            view.append_items(&[
+                item("mode-comic"),
+                item("mode-manga"),
+                item("mode-webtoon"),
+                &sep(),
+                item("toggle-spreads"),
+                item("pair-cover"),
+                item("toggle-rtl"),
+                item("toggle-fit"),
+                &sep(),
+                &b.builtin("fullscreen", true),
+            ])
+            .expect("menu builds");
             b.adapter_items(&view, "view");
 
             let go = Submenu::new("Go", true);
@@ -172,7 +200,7 @@ mod mac {
             menu.append_items(&[&app, &file, &view, &go]).expect("menu builds");
 
             // The Adapters menu appears only once something is installed.
-            let with_commands: Vec<_> = content.adapters.iter().filter(|a| !a.manifest.commands.is_empty()).collect();
+            let with_commands: Vec<_> = content.adapters.iter().collect();
             if !with_commands.is_empty() {
                 let adapters = Submenu::new("Adapters", true);
                 for a in with_commands {
@@ -180,6 +208,8 @@ mod mac {
                     for c in a.manifest.commands.iter().filter(|c| c.menu.is_none()) {
                         sub.append(&b.item(&command_name(&a.manifest.name, &c.id), &c.label, true)).expect("menu builds");
                     }
+                    let remove = format!("Remove {}…", a.manifest.name);
+                    sub.append_items(&[&sep(), &b.item(&format!("remove-adapter {}", a.manifest.name), &remove, true)]).expect("menu builds");
                     adapters.append(&sub).expect("menu builds");
                 }
                 menu.append(&adapters).expect("menu builds");
@@ -190,7 +220,7 @@ mod mac {
                 .append_items(&[&PredefinedMenuItem::minimize(None), &PredefinedMenuItem::maximize(None)])
                 .expect("menu builds");
             let help = Submenu::new("Help", true);
-            help.append_items(&[&b.builtin("help", true), &b.builtin("show-log", true)]).expect("menu builds");
+            help.append_items(&[&b.builtin("help", true), &b.builtin("show-log", true), &b.builtin("copy-debug-info", true)]).expect("menu builds");
             menu.append_items(&[&window, &help]).expect("menu builds");
 
             menu.init_for_nsapp();
@@ -201,7 +231,7 @@ mod mac {
             // whichever menu bar is current when the event arrives.
             HANDLER.get_or_init(|| MenuEvent::set_event_handler(Some(move |e: MenuEvent| send(e.id.0))));
 
-            MenuBar { _menu: menu, commands: b.commands, fit: Some(fit), rtl: Some(rtl) }
+            MenuBar { _menu: menu, commands: b.commands, checks }
         }
 
         pub fn command(&self, id: &str) -> Option<String> {
@@ -209,13 +239,26 @@ mod mac {
         }
 
         /// Updates the View checkmarks without rebuilding the menus.
-        pub fn sync(&self, has_book: bool, rtl: bool, fit_width: bool) {
-            for (item, checked) in [(&self.fit, fit_width), (&self.rtl, rtl)] {
-                if let Some(item) = item {
-                    item.set_checked(checked);
-                    item.set_enabled(has_book);
-                }
+        pub fn sync(&self, view: &View) {
+            for (command, item) in &self.checks {
+                item.set_checked(checked(view, command));
+                item.set_enabled(view.has_book);
             }
+        }
+    }
+
+    const CHECKS: [&str; 7] = ["mode-comic", "mode-manga", "mode-webtoon", "toggle-spreads", "pair-cover", "toggle-rtl", "toggle-fit"];
+
+    fn checked(view: &View, command: &str) -> bool {
+        match command {
+            "mode-comic" => view.mode == Some(Mode::Comic),
+            "mode-manga" => view.mode == Some(Mode::Manga),
+            "mode-webtoon" => view.mode == Some(Mode::Webtoon),
+            "toggle-spreads" => view.spreads,
+            "pair-cover" => view.pair_cover,
+            "toggle-rtl" => view.rtl,
+            "toggle-fit" => view.fit_width,
+            _ => false,
         }
     }
 
@@ -242,5 +285,5 @@ impl MenuBar {
     pub fn command(&self, _: &str) -> Option<String> {
         None
     }
-    pub fn sync(&self, _: bool, _: bool, _: bool) {}
+    pub fn sync(&self, _: &View) {}
 }

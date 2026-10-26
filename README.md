@@ -27,15 +27,39 @@ Any of these opens a book instantly:
 
 After that, just open Leaf: it reopens the last book on the last page.
 
-What Leaf reads (it looks at what's inside a file, not its name):
+What Leaf reads (it looks at what's inside a file, then its name):
 
-- **Archives**: `.cbz`, `.zip`, and image `.epub`
-- **Folders** of images, including chapter subfolders
-- **A single image**, which opens its folder at that image
-- Anything an installed [adapter](docs/adapters.md) opens, such as `.cbr` or PDF
+- **Comic archives**: `.cbz`/`.zip`, `.cbr`/`.rar`, `.cb7`/`.7z`, `.cbt`/`.tar`
+- **PDFs**, drawn sharp at whatever size the window is
+- **EPUBs**: picture books in their own page order, novels as text
+- **Text books**: `.txt`, Markdown, `.rtf`, Word (`.doc`, `.docx`),
+  OpenDocument (`.odt`) and HTML, laid out into pages
+- **Folders** of images, including chapter subfolders, or a single image
+  (which opens its folder at that image)
+- Anything an installed [adapter](docs/adapters.md) opens
 
-Pages can be JPEG, PNG, WebP, GIF or BMP, in natural order (`page2` before
-`page10`). Every book remembers its own page, reading direction and fit.
+Pages can be any image macOS can show: JPEG, PNG, WebP, GIF, BMP, HEIC,
+AVIF, JPEG XL, TIFF, PSD, camera RAW and more, in natural order (`page2`
+before `page10`).
+
+## How it reads
+
+Leaf works out what you've opened and reads it that way:
+
+| Kind | How it's shown | How Leaf tells |
+|---|---|---|
+| **Manga** | Two pages side by side, right to left | Black-and-white pages, `ComicInfo.xml` saying manga, or a Japanese or "manga" name |
+| **Comic** | One page at a time, left to right | Colour pages; also PDFs and text books |
+| **Webtoon** | One long strip you scroll down | Tall, narrow pages, or "webtoon"/"manhwa" in the name |
+
+It says what it decided in the title bar, once, and remembers it for that
+book. If it guessed wrong, pick another in **View** (or press 1, 2 or 3).
+
+In two-page mode the cover stands alone and the pages after it pair up;
+a page that's already a two-page spread stands alone. If the pairs are off
+by one, **View → Pair the Cover** (P) shifts them. **Two Pages** (D) turns
+pairing on or off for any book. Every book remembers its own page, mode,
+direction and fit.
 
 ## Reading
 
@@ -44,18 +68,22 @@ Pages can be JPEG, PNG, WebP, GIF or BMP, in natural order (`page2` before
 | → / ← (or click the right or left third) | Turn toward that side |
 | Space, ↓, PageDown / Shift+Space, ↑, PageUp | Next / previous screen |
 | Home, ⌘↑ / End, ⌘↓ | First / last page |
-| M | Manga mode (right to left) |
+| 1 / 2 / 3 | Read as a comic / manga / webtoon |
+| D | Two pages side by side, or one |
+| P | Pair the cover (when the pairs are off by one) |
+| M | Right to left, or left to right |
 | W | Fit the whole page, or fit the width and scroll |
 | F or ⌃⌘F / Esc | Full screen / leave it |
 | ⌘O / ⌘⇧O | Open a file / a folder |
 | ⌘W | Close the book |
 
-The mouse wheel turns pages, or scrolls in fit-width mode. A thin green line
-along the bottom shows how far through the book you are.
+The mouse wheel turns pages, or scrolls a webtoon or a page in fit-width
+mode. A thin green line along the bottom shows how far through the book you
+are.
 
-The menu bar has everything too: **File**, **View** (fit and direction, with
-checkmarks), **Go**, and **Help → Show Log**. The menus show your own
-shortcuts.
+The menu bar has everything too: **File**, **View** (the reading mode,
+pairing, direction and fit, with checkmarks), **Go**, and **Help**. The
+menus show your own shortcuts.
 
 ## Your files
 
@@ -70,8 +98,29 @@ it: `~/Library/Application Support/Leaf`. Copy it to move your setup.
 | `approvals.json` | Which adapters you've allowed to run. |
 | `leaf.log` | What happened this run, including adapters' output. **Help → Show Log**. |
 
-A broken `state.json` is set aside as `state.json.bad`, not lost, and a
-mistake in `keys.toml` shows in the title bar instead of stopping Leaf.
+## Safety
+
+Leaf follows the same rules as [Folio](https://github.com/solacecasino/folio):
+
+- **It never goes online** and has no account or telemetry. The only web
+  page it ever opens is Help, when you choose it.
+- **Bad files can't take it down.** Pages are size-checked before they're
+  decoded, archive entries over 256 MB are refused, and a page that can't be
+  read shows as a dim card with the reason in the title bar.
+- **Bad settings don't stop it.** A broken `state.json` is set aside as
+  `state.json.bad`, not lost, and a mistake in `keys.toml` shows in the
+  title bar.
+- **A crash leaves a report.** The next launch says so, and **Help → Show
+  Log** has the details. Your place in every book is saved as you read.
+- **Adapters ask first** (see below), can't crash Leaf, can only do what
+  their permissions allow, and one built for another kind of computer is
+  refused with a message saying so.
+- **Questions default to the safe answer.** Return and Escape decline;
+  installing, allowing or removing takes a click.
+- **Bug reports don't give you away.** **Help → Copy Debug Info** copies
+  what a report needs (version, memory, settings, recent problems) without
+  book names, and every path in it and in the log shows `~` for your home
+  folder.
 
 ## Adapters
 
@@ -79,7 +128,8 @@ Leaf ships with no adapters. An adapter is an optional add-on: a separate
 program, in any language, that can add commands or teach Leaf to open a new
 kind of book. To install one, drop its `.zip` or folder on Leaf's window;
 Leaf shows what it is and what it may do first. Its commands appear in an
-**Adapters** menu, which only exists once something is installed.
+**Adapters** menu, which only exists once something is installed, along
+with **Remove**, which moves it to the Trash.
 
 [docs/adapters.md](docs/adapters.md) describes how to write one.
 
@@ -96,8 +146,11 @@ page took.
 
 ## How it's built
 
-About 2,700 lines of Rust: `winit` for the window, the CPU for the pixels
-(`softbuffer`), no GPU, the system's own menus and dialogs.
+About 5,000 lines of Rust: `winit` for the window, the CPU for the pixels
+(`softbuffer`), no GPU, the system's own menus and dialogs. Formats come
+from macOS itself where it can read them, so they cost nothing to download:
+libarchive for RAR, 7-Zip and TAR, Core Graphics for PDF, ImageIO for
+images, and Core Text and AppKit for text.
 
 - **The page is ready before the window is.** The last book opens and its
   page is decoded and scaled on a background thread while macOS is still
@@ -113,9 +166,8 @@ About 2,700 lines of Rust: `winit` for the window, the CPU for the pixels
 
 ## Not yet
 
-- RAR (`.cbr`), 7-Zip (`.cb7`) and PDF without an adapter. Leaf says so
-  instead of guessing.
-- Text EPUBs and other text books; two-page spreads.
+- MOBI/AZW, DjVu and CBA (ACE) books, except through an adapter.
+- Pictures inside text EPUBs; a text book is shown as its words.
 - Live reload of `keys.toml`.
 - Windows and Linux builds. The code is cross-platform, but only the Mac app
-  is built and tested.
+  is built and tested, and its archive, PDF and text reading is Mac-only.

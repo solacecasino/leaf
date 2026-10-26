@@ -1,8 +1,8 @@
 //! Decodes and scales pages on a background thread. The UI says which pages
-//! it wants, most important first; the thread works through them and wakes
-//! the UI with each finished page.
+//! it wants, each at the size it'll be shown, most important first; the
+//! thread works through them and wakes the UI with each finished page.
 
-use crate::book::Book;
+use crate::book::{Book, Page};
 use crate::state::Fit;
 use image::RgbImage;
 use std::collections::VecDeque;
@@ -20,11 +20,33 @@ pub struct Scaled {
     pub px: Vec<u32>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 pub struct Target {
     pub w: u32,
     pub h: u32,
     pub fit: Fit,
+}
+
+/// What a page is like, for laying out spreads and telling manga from comics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageInfo {
+    /// The page's own size (its proportions are what matter).
+    pub w: u32,
+    pub h: u32,
+    /// Black and white, like most manga, rather than colour.
+    pub gray: bool,
+}
+
+impl PageInfo {
+    /// Wider than tall: a two-page spread printed as one image.
+    pub fn wide(&self) -> bool {
+        self.w > self.h + self.h / 10
+    }
+
+    /// Much taller than wide: a strip of a webtoon.
+    pub fn tall(&self) -> bool {
+        self.h > self.w * 2
+    }
 }
 
 pub struct Done {
@@ -32,13 +54,13 @@ pub struct Done {
     pub page: usize,
     pub target: Target,
     pub image: Result<Arc<Scaled>, String>,
+    pub info: Option<PageInfo>,
 }
 
 #[derive(Default)]
 struct Job {
     book: Option<(u64, Arc<Book>)>,
-    target: Target,
-    wanted: VecDeque<usize>,
+    wanted: VecDeque<(usize, Target)>,
     busy: Option<(u64, usize, Target)>,
 }
 
@@ -62,77 +84,142 @@ impl Loader {
     }
 
     /// Replaces the wanted list. A page already being worked on isn't queued again.
-    pub fn want(&self, id: u64, book: &Arc<Book>, target: Target, pages: Vec<usize>) {
+    pub fn want(&self, id: u64, book: &Arc<Book>, pages: Vec<(usize, Target)>) {
         let (lock, cv) = &*self.shared;
         let mut job = lock.lock().unwrap_or_else(|e| e.into_inner());
         let busy = job.busy;
         job.book = Some((id, book.clone()));
-        job.target = target;
-        job.wanted = pages.into_iter().filter(|&p| busy != Some((id, p, target))).collect();
+        job.wanted = pages.into_iter().filter(|&(p, t)| busy != Some((id, p, t))).collect();
         cv.notify_one();
     }
 }
 
+struct Made {
+    id: u64,
+    page: usize,
+    target: Target,
+    image: Weak<Scaled>,
+    info: Option<PageInfo>,
+}
+
 fn work(shared: Shared, deliver: impl Fn(Done) -> bool) {
-    let mut decoded: VecDeque<(u64, usize, Arc<RgbImage>)> = VecDeque::new();
+    let mut decoded: VecDeque<(u64, usize, Arc<RgbImage>, PageInfo)> = VecDeque::new();
     // Pages already scaled, held weakly: a repeat request (one asked again
     // before the first answer reached the UI) is answered without redoing
     // the work, and a page the UI let go of costs nothing here.
-    let mut made: VecDeque<(u64, usize, Target, Weak<Scaled>)> = VecDeque::new();
+    let mut made: VecDeque<Made> = VecDeque::new();
     loop {
         let (id, book, page, target) = {
             let (lock, cv) = &*shared;
             let mut job = lock.lock().unwrap_or_else(|e| e.into_inner());
             job.busy = None;
             loop {
-                if let (Some(&page), Some((id, book))) = (job.wanted.front(), job.book.clone()) {
+                if let (Some(&(page, target)), Some((id, book))) = (job.wanted.front(), job.book.clone()) {
                     job.wanted.pop_front();
-                    job.busy = Some((id, page, job.target));
-                    break (id, book, page, job.target);
+                    job.busy = Some((id, page, target));
+                    break (id, book, page, target);
                 }
                 job = cv.wait(job).unwrap_or_else(|e| e.into_inner());
             }
         };
-        let earlier = made.iter().find(|m| (m.0, m.1, m.2) == (id, page, target)).and_then(|m| m.3.upgrade());
-        if let Some(image) = earlier {
-            if !deliver(Done { book: id, page, target, image: Ok(image) }) {
+        let earlier = made.iter().find(|m| (m.id, m.page, m.target) == (id, page, target));
+        if let Some((image, info)) = earlier.and_then(|m| Some((m.image.upgrade()?, m.info))) {
+            if !deliver(Done { book: id, page, target, image: Ok(image), info }) {
                 return;
             }
             continue;
         }
         let started = std::time::Instant::now();
         // A broken image must never take the reader down with it.
-        let image = catch_unwind(AssertUnwindSafe(|| {
-            load(&mut decoded, id, &book, page).map(|img| Arc::new(scale(&img, target)))
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            load(&mut decoded, id, &book, page, target).map(|(img, info)| (Arc::new(scale(&img, target)), info))
         }))
         .unwrap_or_else(|_| Err(format!("{}: the decoder crashed", book.pages[page])));
-        if let Ok(image) = &image {
-            made.push_back((id, page, target, Arc::downgrade(image)));
-            if made.len() > 8 {
-                made.pop_front();
+        let (image, info) = match result {
+            Ok((image, info)) => {
+                made.push_back(Made { id, page, target, image: Arc::downgrade(&image), info: Some(info) });
+                if made.len() > 12 {
+                    made.pop_front();
+                }
+                (Ok(image), Some(info))
             }
-        }
+            Err(e) => (Err(e), None),
+        };
         if std::env::var_os("LEAF_TIMING").is_some() {
             eprintln!("leaf: page {} decoded and scaled in {:?}", page + 1, started.elapsed());
         }
-        if !deliver(Done { book: id, page, target, image }) {
+        if !deliver(Done { book: id, page, target, image, info }) {
             return;
         }
     }
 }
 
-fn load(decoded: &mut VecDeque<(u64, usize, Arc<RgbImage>)>, id: u64, book: &Book, page: usize) -> Result<Arc<RgbImage>, String> {
-    if let Some((_, _, img)) = decoded.iter().find(|(b, p, _)| *b == id && *p == page) {
-        return Ok(img.clone());
+fn load(
+    decoded: &mut VecDeque<(u64, usize, Arc<RgbImage>, PageInfo)>,
+    id: u64,
+    book: &Book,
+    page: usize,
+    target: Target,
+) -> Result<(Arc<RgbImage>, PageInfo), String> {
+    if let Some((_, _, img, info)) = decoded.iter().find(|(b, p, ..)| *b == id && *p == page) {
+        return Ok((img.clone(), *info));
     }
-    let bytes = book.read(page)?;
-    let img = image::load_from_memory(&bytes).map_err(|e| format!("{}: {e}", book.pages[page]))?;
-    let img = Arc::new(img.into_rgb8());
-    decoded.push_back((id, page, img.clone()));
-    while decoded.len() > DECODED_KEPT {
-        decoded.pop_front();
+    match book.page(page, target)? {
+        // Drawn at the size it's shown, so there's nothing to keep.
+        Page::Drawn(img) => {
+            let info = describe(&img);
+            Ok((Arc::new(img), info))
+        }
+        Page::Bytes(bytes) => {
+            let img = Arc::new(decode(&bytes).map_err(|e| format!("{}: {e}", book.pages[page]))?);
+            let info = describe(&img);
+            decoded.push_back((id, page, img.clone(), info));
+            while decoded.len() > DECODED_KEPT {
+                decoded.pop_front();
+            }
+            Ok((img, info))
+        }
     }
-    Ok(img)
+}
+
+/// Decodes a picture with Leaf's own decoders, within limits a hostile file
+/// can't talk its way past, then with macOS's for everything else.
+pub fn decode(bytes: &[u8]) -> Result<RgbImage, String> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(40_000);
+    limits.max_image_height = Some(120_000);
+    limits.max_alloc = Some(1 << 30);
+    reader.limits(limits);
+    match reader.decode() {
+        Ok(img) => Ok(img.into_rgb8()),
+        Err(e) => {
+            #[cfg(target_os = "macos")]
+            if let Ok(img) = crate::native::decode(bytes) {
+                return Ok(img);
+            }
+            Err(e.to_string())
+        }
+    }
+}
+
+/// A page's size, and whether it's black and white: fewer than 3% of a
+/// grid of sample points are clearly coloured.
+fn describe(img: &RgbImage) -> PageInfo {
+    let (w, h) = img.dimensions();
+    let (step_x, step_y) = ((w / 64).max(1), (h / 64).max(1));
+    let (mut seen, mut colour) = (0u32, 0u32);
+    for y in (0..h).step_by(step_y as usize) {
+        for x in (0..w).step_by(step_x as usize) {
+            let p = img.get_pixel(x, y);
+            let (hi, lo) = (p[0].max(p[1]).max(p[2]), p[0].min(p[1]).min(p[2]));
+            seen += 1;
+            if hi - lo > 48 {
+                colour += 1;
+            }
+        }
+    }
+    PageInfo { w, h, gray: colour * 100 < seen * 3 }
 }
 
 pub fn scaled_size(iw: u32, ih: u32, t: Target) -> (u32, u32) {
@@ -229,6 +316,27 @@ mod tests {
             assert!(out.px.iter().all(|&p| p == 0xc86407), "{w}x{h}");
             assert_eq!(out.px.len(), (out.w * out.h) as usize);
         }
+    }
+
+    #[test]
+    fn tells_black_and_white_from_colour() {
+        let gray = RgbImage::from_fn(200, 300, |x, _| image::Rgb([(x % 256) as u8; 3]));
+        let colour = RgbImage::from_fn(200, 300, |x, y| image::Rgb([x as u8, y as u8, 40]));
+        assert!(describe(&gray).gray);
+        assert!(!describe(&colour).gray);
+        let info = describe(&RgbImage::new(800, 3000));
+        assert!(info.tall() && !info.wide());
+        assert!(PageInfo { w: 2000, h: 1400, gray: true }.wide());
+    }
+
+    #[test]
+    fn refuses_huge_images() {
+        // A PNG header claiming 100000 x 100000 pixels.
+        let mut png = Vec::new();
+        RgbImage::new(1, 1).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        png[16..20].copy_from_slice(&100_000u32.to_be_bytes());
+        png[20..24].copy_from_slice(&100_000u32.to_be_bytes());
+        assert!(decode(&png).is_err());
     }
 
     #[test]

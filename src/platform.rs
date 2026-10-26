@@ -95,3 +95,104 @@ unsafe impl GlobalAlloc for Allocator {
         unsafe { System.alloc_zeroed(layout) }
     }
 }
+
+/// `text` with the home folder written as `~`, so a pasted path doesn't
+/// give away someone's user name.
+pub fn hide_home(text: &str) -> String {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    match home.map(|h| h.to_string_lossy().trim_end_matches(['/', '\\']).to_owned()) {
+        Some(home) if home.len() > 1 => text.replace(&home, "~"),
+        _ => text.to_owned(),
+    }
+}
+
+/// Leaf's memory now and at its most, as the system's own monitor counts it.
+pub fn memory_use() -> Option<(u64, u64)> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::rusage_info_v4>::zeroed();
+        // SAFETY: the buffer is a zeroed rusage_info_v4, the size flavor 4 fills.
+        let ok = unsafe { libc::proc_pid_rusage(std::process::id() as i32, libc::RUSAGE_INFO_V4, info.as_mut_ptr().cast()) == 0 };
+        // SAFETY: filled in when the call succeeds.
+        let info = unsafe { info.assume_init() };
+        ok.then_some((info.ri_phys_footprint, info.ri_lifetime_max_phys_footprint))
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+/// Puts text on the clipboard.
+pub fn copy(text: &str) {
+    use std::io::Write;
+    #[cfg(target_os = "macos")]
+    let program = "pbcopy";
+    #[cfg(windows)]
+    let program = "clip";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xclip";
+    let child = Command::new(program).stdin(std::process::Stdio::piped()).spawn();
+    if let Ok(mut child) = child {
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
+}
+
+/// Moves a folder to the Trash, where it can still be recovered, renaming
+/// it if the name is taken there.
+pub fn move_to_trash(dir: &Path) -> Result<(), String> {
+    let trash = if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join(".Trash")
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Trash/files")
+    };
+    move_into(dir, &trash)
+}
+
+fn move_into(dir: &Path, trash: &Path) -> Result<(), String> {
+    let _ = std::fs::create_dir_all(trash);
+    let name = dir.file_name().ok_or("nothing to move")?.to_string_lossy().into_owned();
+    let mut to = trash.join(&name);
+    let mut n = 2;
+    while to.exists() {
+        to = trash.join(format!("{name} {n}"));
+        n += 1;
+    }
+    std::fs::rename(dir, &to).map_err(|e| format!("Couldn't move {name} to the Trash: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hides_the_user_name() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(hide_home(&format!("Config folder: {home}/Library/Leaf")), "Config folder: ~/Library/Leaf");
+    }
+
+    #[test]
+    fn reads_its_own_memory() {
+        if cfg!(target_os = "macos") {
+            // The most-so-far figure is updated lazily, so it can trail a moment.
+            let (now, peak) = memory_use().unwrap();
+            assert!(now > 0 && peak > 0);
+        }
+    }
+
+    #[test]
+    fn trash_keeps_both_copies() {
+        let root = std::env::temp_dir().join(format!("leaf-trash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for _ in 0..2 {
+            std::fs::create_dir_all(root.join("thing")).unwrap();
+            move_into(&root.join("thing"), &root.join("Trash")).unwrap();
+        }
+        assert!(root.join("Trash/thing").is_dir() && root.join("Trash/thing 2").is_dir());
+    }
+}
