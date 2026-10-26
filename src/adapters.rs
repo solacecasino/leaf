@@ -831,9 +831,19 @@ done
         };
         std::fs::write(dir.join("win.exe"), b"MZ\x90\x00").unwrap();
         std::fs::write(dir.join("linux"), b"\x7fELF\x02\x01").unwrap();
+        std::fs::write(dir.join("mac"), [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2]).unwrap();
         std::fs::write(dir.join("script.sh"), b"#!/bin/sh").unwrap();
-        assert!(check_platform(&dir, &m("./win.exe")).unwrap_err().contains("Windows"));
-        assert!(check_platform(&dir, &m("./linux")).unwrap_err().contains("Linux"));
+        // Each runs only on its own system, and is refused by name elsewhere.
+        for (file, system, ours) in [
+            ("./win.exe", "Windows", cfg!(windows)),
+            ("./linux", "Linux", cfg!(target_os = "linux")),
+            ("./mac", "macOS", cfg!(target_os = "macos")),
+        ] {
+            match check_platform(&dir, &m(file)) {
+                Ok(()) => assert!(ours, "{file} was let through"),
+                Err(e) => assert!(!ours && e.contains(system), "{file}: {e}"),
+            }
+        }
         assert!(check_platform(&dir, &m("./script.sh")).is_ok());
         assert!(check_platform(&dir, &m("python3")).is_ok());
         assert!(check_platform(&dir, &m("./missing")).is_err());

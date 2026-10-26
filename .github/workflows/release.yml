@@ -15,7 +15,25 @@ permissions:
   contents: write
 
 jobs:
+  # A real RAR book, made with RARLAB's rar (Ubuntu packages it; Homebrew
+  # dropped it in 2026), for the Mac jobs to open too.
+  rar-book:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update && sudo apt-get install -y rar
+          scripts/test-books.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rar-book
+          path: test-books/manga.cbr
+          if-no-files-found: error
+
   mac:
+    needs: rar-book
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,18 +41,19 @@ jobs:
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - name: Install RARLAB's rar, to test real RAR files
-        run: brew install --cask rar
       - name: Test
-        env:
-          LEAF_REQUIRE_RAR: "1"
         run: cargo test
       - name: Package
         run: scripts/package.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: rar-book
+          path: rar-book
       - name: Check that the download opens every kind of book
         run: |
           set -e
           scripts/test-books.sh
+          cp rar-book/manga.cbr test-books/
           ditto -x -k dist/Leaf-*-macos-universal.zip x
           app=x/Leaf.app/Contents/MacOS/leaf
           archs=$(lipo -archs "$app"); echo "archs: $archs"
@@ -55,21 +74,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install RARLAB's rar
-        run: brew install --cask rar
       - name: Test, built for Intel
-        env:
-          LEAF_REQUIRE_RAR: "1"
         run: cargo test
       - uses: actions/download-artifact@v4
         with:
           name: leaf-macos
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: rar-book
+          path: rar-book
       - name: Check that the download's Intel half opens every kind of book
         run: |
           set -e
           uname -m
           scripts/test-books.sh
+          cp rar-book/manga.cbr test-books/
           ditto -x -k dist/Leaf-*-macos-universal.zip x
           app=x/Leaf.app/Contents/MacOS/leaf
           arch -x86_64 "$app" --version
@@ -141,8 +161,10 @@ jobs:
       - name: Dependencies (libarchive is found at run time, for RAR, 7-Zip and TAR)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libarchive13 libarchive-tools xvfb xdotool imagemagick openbox
+          sudo apt-get install -y libarchive13 libarchive-tools rar xvfb xdotool imagemagick openbox
       - name: Test
+        env:
+          LEAF_REQUIRE_RAR: "1"
         run: cargo test
       - name: Package
         run: |
