@@ -105,6 +105,9 @@ jobs:
           rm -rf a && mkdir a && cd a && unzip -q ../dist/upscale-4k-*-macos-universal.zip
           ./upscale-4k/upscale-4k --selftest
           ./upscale-4k/upscale-4k --bench
+          # A real GPU is offered to Leaf.
+          printf '{"id":1,"method":"upscale.ready"}\n' | ./upscale-4k/upscale-4k | tee ready.json
+          grep -q '"device"' ready.json
       - uses: actions/upload-artifact@v4
         with:
           name: leaf-macos
@@ -199,6 +202,9 @@ jobs:
           rm -rf a && mkdir a && cd a && unzip -q ../dist/upscale-4k-*-windows-*.zip
           ./upscale-4k/upscale-4k.exe --selftest
           ./upscale-4k/upscale-4k.exe --bench
+          # The software GPU is turned down, so Leaf scales by itself.
+          printf '{"id":1,"method":"upscale.ready"}\n' | ./upscale-4k/upscale-4k.exe | tee ready.json
+          grep -q 'drawn by the CPU' ready.json
       - name: Screenshots
         if: matrix.arch == 'x64'
         shell: pwsh
@@ -284,6 +290,9 @@ jobs:
           rm -rf a && mkdir a && cd a && unzip -q ../dist/upscale-4k-*-linux-*.zip
           ./upscale-4k/upscale-4k --selftest
           ./upscale-4k/upscale-4k --bench
+          # The software GPU is turned down, so Leaf scales by itself.
+          printf '{"id":1,"method":"upscale.ready"}\n' | ./upscale-4k/upscale-4k | tee ready.json
+          grep -q 'drawn by the CPU' ready.json
       - name: Screenshots
         if: matrix.arch == 'x64'
         timeout-minutes: 3

@@ -54,6 +54,8 @@ pub struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pub name: String,
+    /// Drawn by the CPU (WARP, llvmpipe): slower than Leaf's own scaler.
+    pub software: bool,
     params: wgpu::Buffer,
     layout: wgpu::BindGroupLayout,
     unpack: wgpu::ComputePipeline,
@@ -156,6 +158,7 @@ impl Gpu {
         });
         Ok(Gpu {
             name: format!("{} ({:?})", info.name, info.backend),
+            software: info.device_type == wgpu::DeviceType::Cpu,
             unpack: pipeline("unpack_source"),
             upscale: pipeline("upscale"),
             gradient: pipeline("gradient"),

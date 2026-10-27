@@ -59,6 +59,22 @@ the GPU is busy; the rest is the GPU waking up and handing the picture back.
 Leaf never waits for it: pages show at once, scaled by Leaf, and the
 upscaled ones replace them as they arrive.
 
+**It needs a real GPU.** Where the only one is drawn by the CPU (a virtual
+machine, Remote Desktop, Windows without its graphics driver), it's far
+slower than Leaf's own scaling, so the adapter turns it down and Leaf says
+"Upscaling isn't available". Measured on GitHub's runners, line art /
+colour a page:
+
+| Software GPU | Each page |
+|---|---|
+| llvmpipe, Linux x64 | 530 / 235 ms |
+| llvmpipe, Linux Arm | 1,410 / 649 ms |
+| WARP, Windows x64 | 4,597 / 1,528 ms |
+| WARP, Windows Arm | 8,035 / 1,528 ms |
+
+`UPSCALE_SOFTWARE=1` uses one anyway. `--selftest` and `--bench` always
+run, and say when the GPU is a software one.
+
 ## How it talks to Leaf
 
 It's an ordinary Leaf adapter (protocol 3, `filters = ["upscale"]`): Leaf

@@ -30,7 +30,7 @@ fn main() {
 
 /// Talks to Leaf: one JSON message a line on stdin, answers on stdout.
 fn serve() {
-    let mut gpu: Option<Gpu> = None;
+    let mut gpu: Option<Result<Gpu, String>> = None;
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines().map_while(Result::ok) {
@@ -56,14 +56,28 @@ fn serve() {
     }
 }
 
-fn ready(gpu: &mut Option<Gpu>) -> Result<&mut Gpu, String> {
+/// The GPU, set up the first time it's needed. A software one (a virtual
+/// machine's, or Windows' when the driver is missing) is turned down: it
+/// takes half a second to eight seconds a page where Leaf's own scaler
+/// takes about 50 ms, so Leaf is better off scaling by itself.
+/// `UPSCALE_SOFTWARE=1` uses it anyway.
+fn ready(gpu: &mut Option<Result<Gpu, String>>) -> Result<&mut Gpu, String> {
     if gpu.is_none() {
         let started = Instant::now();
-        let g = Gpu::new()?;
-        eprintln!("using {} (ready in {:.0} ms)", g.name, started.elapsed().as_secs_f64() * 1000.0);
+        let g = Gpu::new().and_then(|g| {
+            if g.software && std::env::var_os("UPSCALE_SOFTWARE").is_none() {
+                Err(format!("this computer's only GPU is {}, drawn by the CPU, which is slower than Leaf's own scaling", g.name))
+            } else {
+                Ok(g)
+            }
+        });
+        match &g {
+            Ok(g) => eprintln!("using {} (ready in {:.0} ms)", g.name, started.elapsed().as_secs_f64() * 1000.0),
+            Err(e) => eprintln!("{e}"),
+        }
         *gpu = Some(g);
     }
-    Ok(gpu.as_mut().expect("just set"))
+    gpu.as_mut().expect("just set").as_mut().map_err(|e| e.clone())
 }
 
 fn page(gpu: &mut Gpu, p: &Value) -> Result<Value, String> {
@@ -173,6 +187,9 @@ fn selftest() -> i32 {
         }
     };
     println!("GPU: {}", gpu.name);
+    if gpu.software {
+        println!("     drawn by the CPU: Leaf scales by itself here instead (tested anyway)");
+    }
     let (iw, ih, ow, oh) = (1200u32, 1700u32, 2400u32, 3400u32);
     let page = test_page(iw, ih);
     let mut failures = 0;
