@@ -19,6 +19,8 @@ const EXAMPLE: &str = r##"# Leaf settings. Every line is commented out, so Leaf 
 # color_threshold = 3        # percent of a page that must be in colour for it to count as colour
 # continue_to_next = true    # turning past the last page opens the next book in the folder
 # magnifier_zoom = 2.0       # how much the magnifier (Z) enlarges
+# upscale_style = "auto"     # with an upscaler adapter: "auto" (line art for manga and
+#                            # webtoons, soft for comics), "lines" or "soft"
 
 # [text]                     # books of writing: .txt, .rtf, Word, text EPUBs
 # font = "Iowan Old Style"
@@ -39,6 +41,7 @@ pub struct Settings {
     pub color_threshold: f64,
     pub continue_to_next: bool,
     pub magnifier_zoom: f64,
+    pub upscale_style: String,
     pub text: TextSettings,
 }
 
@@ -63,6 +66,7 @@ impl Default for Settings {
             color_threshold: 3.0,
             continue_to_next: true,
             magnifier_zoom: 2.0,
+            upscale_style: "auto".into(),
             text: TextSettings::default(),
         }
     }
@@ -98,7 +102,7 @@ impl<'de> Deserialize<'de> for Color {
 
 const KNOWN: &[&str] = &[
     "background", "accent", "progress", "page_gap", "webtoon_width", "default_mode", "color_threshold",
-    "continue_to_next", "magnifier_zoom", "text",
+    "continue_to_next", "magnifier_zoom", "upscale_style", "text",
 ];
 const KNOWN_TEXT: &[&str] = &["font", "size", "paper", "ink"];
 
@@ -156,6 +160,11 @@ fn parse(text: &str) -> (Settings, Option<String>) {
     check((0.0..=100.0).contains(&s.color_threshold), "color_threshold", &mut || s.color_threshold = d.color_threshold);
     check((1.2..=6.0).contains(&s.magnifier_zoom), "magnifier_zoom", &mut || s.magnifier_zoom = d.magnifier_zoom);
     check((6.0..=72.0).contains(&s.text.size), "text.size", &mut || s.text.size = d.text.size);
+    check(
+        ["auto", "lines", "soft"].contains(&s.upscale_style.as_str()),
+        "upscale_style (use auto, lines or soft)",
+        &mut || s.upscale_style = d.upscale_style.clone(),
+    );
     check(
         ["auto", "comic", "manga", "webtoon"].contains(&s.default_mode.as_str()),
         "default_mode (use auto, comic, manga or webtoon)",

@@ -1,6 +1,6 @@
 [package]
 name = "leaf"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 description = "A bare, instant comic and manga reader that reopens where you left off."
 license = "MIT"
@@ -17,6 +17,8 @@ rfd = "0.17.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
+# Shared memory with upscaler adapters (see upscale.rs).
+memmap2 = "0.9.12"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -29,6 +31,40 @@ muda = { version = "0.21.2", default-features = false }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
+
+# Windows and Linux: the formats macOS reads for Leaf, read by Leaf itself.
+# (The Mac build uses macOS's own; its tests build these too, so they're
+# tested on every system.)
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+image = { version = "0.25.10", default-features = false, features = ["tiff", "tga", "ico", "pnm", "hdr", "exr"] }
+pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfium_latest", "thread_safe"] }
+cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash", "fontconfig"] }
+unrar = "0.5.8"
+sevenz-rust2 = { version = "0.24.1", default-features = false }
+tar = { version = "0.4.46", default-features = false }
+jxl-oxide = { version = "0.12.6", default-features = false }
+psd = "0.3.5"
+hayro-jpeg2000 = "0.4.1"
+icns = "0.5.0"
+rawler = "0.8.0"
+avif-decode = { version = "3.0.0", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Graphics_Imaging", "Win32_System_Com"] }
+
+[dev-dependencies]
+image = { version = "0.25.10", default-features = false, features = ["tiff", "tga", "ico", "pnm", "hdr", "exr"] }
+pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfium_latest", "thread_safe"] }
+cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash", "fontconfig"] }
+unrar = "0.5.8"
+sevenz-rust2 = { version = "0.24.1", default-features = false }
+tar = { version = "0.4.46", default-features = false }
+jxl-oxide = { version = "0.12.6", default-features = false }
+psd = "0.3.5"
+hayro-jpeg2000 = "0.4.1"
+icns = "0.5.0"
+rawler = "0.8.0"
+avif-decode = { version = "3.0.0", default-features = false }
 
 [profile.release]
 strip = true

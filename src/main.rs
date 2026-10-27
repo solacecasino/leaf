@@ -22,8 +22,13 @@ mod menu;
 #[cfg(target_os = "macos")]
 mod native;
 mod platform;
+// Windows and Linux read PDFs, text books, archives and more pictures
+// themselves; on a Mac this is built only for the tests.
+#[cfg(any(not(target_os = "macos"), test))]
+mod portable;
 mod settings;
 mod state;
+mod upscale;
 mod watch;
 
 use adapters::{BOOK_CONTROL, BOOK_READ, Host};
@@ -75,6 +80,8 @@ pub enum Event {
     Adapter(adapters::Message),
     /// Something changed in the config folder (see watch.rs).
     Config,
+    /// The upscaler adapter is ready (its GPU's name), or couldn't start.
+    UpscalerReady(Result<String, String>),
 }
 
 fn main() {
@@ -249,6 +256,8 @@ struct App {
     /// Digits typed after Go to Page, until Return or Escape.
     typing: Option<String>,
     magnifier: bool,
+    /// The upscaler adapter, while upscaling is on.
+    upscaler: Option<Arc<upscale::Upscaler>>,
     /// A file is being dragged over the window.
     hovering: bool,
     last_drop: Option<Instant>,
@@ -293,6 +302,7 @@ impl App {
             notice: None,
             typing: None,
             magnifier: false,
+            upscaler: None,
             hovering: false,
             last_drop: None,
             focused: true,
@@ -314,6 +324,8 @@ impl App {
         if let Some(path) = pending {
             app.open_path(path);
         }
+        // The upscaler starts alongside; pages don't wait for it.
+        app.sync_upscaler();
         app
     }
 
@@ -513,13 +525,67 @@ impl App {
         self.reload_adapters();
     }
 
+    /// Starts or stops the upscaler adapter to match View → Upscale Pages,
+    /// and tells the page loader how to upscale this book.
+    fn sync_upscaler(&mut self) {
+        let wanted = self.state.upscale != Some(false);
+        match self.host.upscaler() {
+            Some(i) if wanted => {
+                if self.upscaler.is_none() {
+                    match self.host.start(i) {
+                        Ok(link) => {
+                            let up = upscale::Upscaler::new(link);
+                            let proxy = self.proxy.clone();
+                            up.warm_up(move |r| drop(proxy.send_event(Event::UpscalerReady(r))));
+                            self.upscaler = Some(up);
+                        }
+                        Err(e) => {
+                            self.state.upscale = Some(false);
+                            self.say(e);
+                        }
+                    }
+                }
+            }
+            _ => self.upscaler = None,
+        }
+        self.tell_loader_upscaler();
+    }
+
+    /// The upscaler and style for the open book: line art for manga and
+    /// webtoons, soft for comics, unless settings.toml says otherwise.
+    fn tell_loader_upscaler(&self) {
+        let style = match (settings::get().upscale_style.as_str(), self.open.as_ref().map(Open::mode)) {
+            ("lines", _) => upscale::Style::Lines,
+            ("soft", _) | (_, Some(Mode::Comic)) => upscale::Style::Soft,
+            _ => upscale::Style::Lines,
+        };
+        self.loader.set_upscaler(self.upscaler.clone().map(|u| (u, style)));
+    }
+
+    /// Pages are made again (the old ones showing until then), after the
+    /// way they're made changed.
+    fn remake_pages(&mut self) {
+        if let Some(o) = &mut self.open {
+            for (piece, (_, img)) in o.cache.drain() {
+                if let Ok(img) = img {
+                    o.stale.insert(piece, img);
+                }
+            }
+        }
+        self.request_pages();
+        self.redraw();
+    }
+
     fn reload_adapters(&mut self) {
         // A book read through an adapter is reopened on the restarted one.
         let reopen = self.open.as_ref().filter(|o| o.book.adapter().is_some()).map(|o| o.book.path.clone());
         self.remember();
+        self.upscaler = None;
+        self.loader.set_upscaler(None);
         self.host.reload();
         self.reload_keys();
         self.host.start_launch_adapters();
+        self.sync_upscaler();
         match reopen {
             Some(path) => drop(self.open_path(path)),
             None => self.rebuild_menu(),
@@ -623,8 +689,9 @@ impl App {
                 rtl: o.at.rtl,
                 fit_width: o.at.fit == Fit::Width,
                 magnifier: self.magnifier,
+                upscale: self.host.upscaler().map(|_| self.state.upscale != Some(false)),
             },
-            None => menu::View::default(),
+            None => menu::View { upscale: self.host.upscaler().map(|_| self.state.upscale != Some(false)), ..menu::View::default() },
         }
     }
 
@@ -751,10 +818,11 @@ impl App {
     /// (for a book not yet read) a few to look at.
     fn request_pages(&mut self) {
         let (w, h) = self.window_px();
-        let Some(o) = &self.open else { return };
-        if w == 0 || h == 0 {
+        if self.open.is_none() || w == 0 || h == 0 {
             return;
         }
+        self.tell_loader_upscaler();
+        let Some(o) = &self.open else { return };
         let mut wanted: Vec<(Piece, Target)> = Vec::new();
         if o.mode() == Mode::Webtoon {
             // The bands in view, then one more window below, then half a
@@ -983,6 +1051,20 @@ impl App {
                     self.moved();
                 }
             }
+            "toggle-upscale" => {
+                if self.host.upscaler().is_none() {
+                    return self.say("Upscaling needs an upscaler adapter (see the adapters catalog)");
+                }
+                let on = self.state.upscale == Some(false);
+                self.state.upscale = Some(on);
+                state::save(&self.state);
+                self.sync_upscaler();
+                self.remake_pages();
+                self.sync_menu();
+                if !on {
+                    self.say("Upscaling off");
+                }
+            }
             "toggle-magnifier" => {
                 self.magnifier = !self.magnifier && self.open.is_some();
                 // The enlarged pictures go as soon as it's put away.
@@ -1090,6 +1172,9 @@ impl App {
         }
         let adapters: Vec<String> = self.host.all.iter().map(|a| format!("{} {}", a.manifest.name, a.manifest.version)).collect();
         out.push(format!("Adapters: {}", if adapters.is_empty() { "none".into() } else { adapters.join(", ") }));
+        if let Some(u) = &self.upscaler {
+            out.push(format!("Upscaling: {} ({})", u.name, if u.usable() { "working" } else { "not working; Leaf scales" }));
+        }
         let changed = |name: &str| {
             std::fs::read_to_string(state::dir().join(name))
                 .is_ok_and(|t| t.lines().any(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')))
@@ -1508,6 +1593,20 @@ impl ApplicationHandler<Event> for App {
             Event::Loaded(Loaded::Grew(id)) => self.book_grew(id),
             Event::Incoming => self.open_incoming(),
             Event::Config => self.reload_config(),
+            Event::UpscalerReady(result) => match (result, &self.upscaler) {
+                (Ok(device), Some(up)) => {
+                    let text = format!("Upscaling with {} on {device}", up.name);
+                    self.tell_loader_upscaler();
+                    self.remake_pages();
+                    self.say(text);
+                }
+                (Err(e), Some(_)) => {
+                    self.upscaler = None;
+                    self.tell_loader_upscaler();
+                    self.say(format!("Upscaling isn't available: {e}"));
+                }
+                _ => {}
+            },
             Event::Menu(id) => {
                 if let Some(command) = self.menu.as_ref().and_then(|m| m.command(&id)) {
                     self.run(&command);

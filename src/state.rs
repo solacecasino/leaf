@@ -66,6 +66,9 @@ pub struct State {
     /// The display scale the window was last on, to size the first page before the window opens.
     #[serde(default)]
     pub scale: Option<f64>,
+    /// Upscaling with an upscaler adapter: on unless switched off (View → Upscale).
+    #[serde(default)]
+    pub upscale: Option<bool>,
 }
 
 const RECENT_KEPT: usize = 10;

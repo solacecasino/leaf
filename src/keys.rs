@@ -39,6 +39,7 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("cmd+down", "last"),
     ("cmd+,", "open-config-folder"),
     ("z", "toggle-magnifier"),
+    ("u", "toggle-upscale"),
     ("g", "go-to-page"),
     ("cmd+g", "go-to-page"),
     ("cmd+]", "next-book"),
@@ -48,7 +49,7 @@ const DEFAULTS: &[(&str, &str)] = &[
 pub const COMMANDS: &[&str] = &[
     "next", "prev", "page-right", "page-left", "first", "last", "go-to-page", "next-book", "prev-book",
     "mode-comic", "mode-manga", "mode-webtoon", "toggle-spreads", "pair-cover", "toggle-rtl", "toggle-fit",
-    "toggle-magnifier", "copy-debug-info", "fullscreen", "leave-fullscreen", "open-file", "open-folder",
+    "toggle-magnifier", "toggle-upscale", "copy-debug-info", "fullscreen", "leave-fullscreen", "open-file", "open-folder",
     "close-book", "quit", "open-config-folder", "show-adapters-folder", "reload-adapters", "show-log",
     "edit-keys", "edit-settings", "help", "none",
 ];
@@ -74,6 +75,7 @@ const EXAMPLE: &str = r#"# Leaf key bindings. Lines here add to or replace the b
 #   toggle-rtl            right-to-left reading
 #   toggle-fit            fit the whole page or fit the width
 #   toggle-magnifier      enlarge what's under the pointer
+#   toggle-upscale        upscale pages with an upscaler adapter, or not
 #   fullscreen, leave-fullscreen
 #   open-file, open-folder, close-book, quit
 #   open-config-folder, show-adapters-folder, reload-adapters, show-log,

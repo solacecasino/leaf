@@ -22,12 +22,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The protocol version sent in `initialize`. New versions only add things.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 pub const BOOK_READ: &str = "book.read";
 pub const BOOK_CONTROL: &str = "book.control";
+/// Sees the pages' pixels (for filters such as upscaling).
+pub const BOOK_PAGES: &str = "book.pages";
 pub const NETWORK: &str = "network";
-const KNOWN_PERMISSIONS: [&str; 3] = [BOOK_READ, BOOK_CONTROL, NETWORK];
+const KNOWN_PERMISSIONS: [&str; 4] = [BOOK_READ, BOOK_CONTROL, BOOK_PAGES, NETWORK];
 
 /// How long Leaf waits for a book-opening adapter to answer.
 pub const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -59,6 +61,9 @@ pub struct Manifest {
     /// File extensions this adapter can open as books.
     #[serde(default)]
     pub opens: Vec<String>,
+    /// What it does to pages: "upscale" (protocol 3). Needs `book.pages`.
+    #[serde(default)]
+    pub filters: Vec<String>,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -194,6 +199,11 @@ impl Host {
 
     pub fn has(&self, name: &str, permission: &str) -> bool {
         self.index(name).is_some_and(|i| self.all[i].manifest.permissions.iter().any(|p| p == permission))
+    }
+
+    /// The first adapter that upscales pages (and may see them).
+    pub fn upscaler(&self) -> Option<usize> {
+        self.all.iter().position(|a| a.manifest.filters.iter().any(|f| f == "upscale") && a.manifest.permissions.iter().any(|p| p == BOOK_PAGES))
     }
 
     /// The adapter that opens books like `path`, by extension.
@@ -595,12 +605,42 @@ fn unzip(zip_path: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// A running program wired up as an adapter, without a manifest or the
+/// approval dialog: for tests of things that talk to adapters.
+#[cfg(test)]
+pub fn test_link(program: &Path) -> Arc<Link> {
+    let mut child = Command::new(program).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().expect("start the test adapter");
+    let link = Arc::new(Link {
+        name: program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        stdin: Mutex::new(child.stdin.take().expect("piped")),
+        pending: Mutex::default(),
+        next_id: AtomicU64::new(0),
+        alive: AtomicBool::new(true),
+    });
+    let (reader, stdout) = (link.clone(), child.stdout.take().expect("piped"));
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let Ok(m) = serde_json::from_str::<Value>(&line) else { continue };
+            let Some(id) = m["id"].as_u64() else { continue };
+            let result = match m.get("error") {
+                Some(e) => Err(e.as_str().unwrap_or("error").to_owned()),
+                None => Ok(m["result"].clone()),
+            };
+            reader.answered(id, result);
+        }
+        reader.stopped();
+        drop(child);
+    });
+    link
+}
+
 // ---- Approval --------------------------------------------------------------
 
 pub fn describe(permission: &str) -> String {
     match permission {
         BOOK_READ => "see which book is open and the page you're on".into(),
         BOOK_CONTROL => "open books and turn pages".into(),
+        BOOK_PAGES => "see the pages you read (to change how they look)".into(),
         NETWORK => "connect to the internet or other computers".into(),
         other => other.to_owned(),
     }
@@ -625,6 +665,9 @@ pub fn summary(m: &Manifest) -> String {
     }
     if !m.opens.is_empty() {
         text += &format!("\n\nIt opens: {}.", m.opens.join(", "));
+    }
+    if m.filters.iter().any(|f| f == "upscale") {
+        text += "\n\nIt upscales pages shown bigger than they are.";
     }
     if m.permissions.is_empty() {
         text += "\n\nIt doesn't ask for any permissions.";
@@ -828,6 +871,7 @@ done
             events: Vec::new(),
             commands: Vec::new(),
             opens: Vec::new(),
+            filters: Vec::new(),
         };
         std::fs::write(dir.join("win.exe"), b"MZ\x90\x00").unwrap();
         std::fs::write(dir.join("linux"), b"\x7fELF\x02\x01").unwrap();

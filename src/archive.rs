@@ -89,6 +89,12 @@ libarchive! {
 
 static LIB: OnceLock<Result<Lib, String>> = OnceLock::new();
 
+/// Whether the system has libarchive.
+#[cfg(target_os = "linux")]
+pub fn available() -> bool {
+    lib().is_ok()
+}
+
 fn lib() -> Result<&'static Lib, String> {
     LIB.get_or_init(load).as_ref().map_err(Clone::clone)
 }

@@ -2,3 +2,4 @@
 /samples
 /dist
 /test-books
+/adapters/*/target

@@ -64,11 +64,12 @@ enum Kind {
     Zip(Mutex<ZipArchive<BufReader<File>>>),
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     Archive(Mutex<crate::archive::Book>),
-    #[cfg(target_os = "macos")]
-    Pdf(crate::native::Pdf),
+    /// RAR, 7-Zip and TAR read by Leaf itself, where libarchive isn't there.
+    #[cfg(not(target_os = "macos"))]
+    PureArchive(Mutex<crate::portable::archives::Book>),
+    Pdf(PdfEngine),
     /// Writing laid out into pages, and the EPUB its pictures come from.
-    #[cfg(target_os = "macos")]
-    Text(crate::native::Text, Option<Mutex<ZipArchive<BufReader<File>>>>),
+    Text(TextEngine, Option<Mutex<ZipArchive<BufReader<File>>>>),
     /// A format an adapter reads for Leaf (`opens` in adapter.toml).
     Adapter(Arc<Link>),
 }
@@ -165,9 +166,22 @@ fn looks_like_text(path: &Path) -> bool {
     n > 0 && !head.contains(&0) && std::str::from_utf8(&head[..head.len().saturating_sub(4)]).is_ok()
 }
 
+// PDF and text books: drawn by macOS on a Mac, by pdfium and cosmic-text
+// elsewhere, through the same few calls.
+#[cfg(target_os = "macos")]
+type PdfEngine = crate::native::Pdf;
 #[cfg(not(target_os = "macos"))]
-fn mac_only(what: &str) -> String {
-    format!("{what} open only in the Mac version of Leaf so far, or with an adapter")
+type PdfEngine = crate::portable::pdf::Pdf;
+#[cfg(target_os = "macos")]
+type TextEngine = crate::native::Text;
+#[cfg(not(target_os = "macos"))]
+type TextEngine = crate::portable::text::Text;
+
+/// One page of a text book: words drawn at the size asked for, or the
+/// name of a picture (in the EPUB) that has the page to itself.
+pub enum TextPage {
+    Words(RgbImage),
+    Picture(String),
 }
 
 impl Book {
@@ -179,9 +193,7 @@ impl Book {
     /// except a text book, which is laid out as it's read.
     pub fn len(&self) -> usize {
         match &self.kind {
-            #[cfg(target_os = "macos")]
             Kind::Pdf(pdf) => pdf.pages(),
-            #[cfg(target_os = "macos")]
             Kind::Text(text, _) => text.pages(),
             _ => self.names.len(),
         }
@@ -190,7 +202,6 @@ impl Book {
     /// Whether every page is known.
     pub fn complete(&self) -> bool {
         match &self.kind {
-            #[cfg(target_os = "macos")]
             Kind::Text(text, _) => text.complete(),
             _ => true,
         }
@@ -200,7 +211,6 @@ impl Book {
     /// being laid out.
     pub fn estimate(&self) -> usize {
         match &self.kind {
-            #[cfg(target_os = "macos")]
             Kind::Text(text, _) => text.estimate(),
             _ => self.len(),
         }
@@ -208,12 +218,9 @@ impl Book {
 
     /// Lays out a text book until `page` exists (or it ends).
     pub fn ensure(&self, page: usize) {
-        #[cfg(target_os = "macos")]
         if let Kind::Text(text, _) = &self.kind {
             let _ = text.ensure(page);
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = page;
     }
 
     /// Lays out a few more pages of a text book, in the background.
@@ -337,8 +344,29 @@ impl Book {
         Ok(book)
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    /// RAR, 7-Zip and TAR: through libarchive on macOS (and Linux, when
+    /// it's there), otherwise read by Leaf itself.
     fn archive(path: &Path) -> Result<Book, String> {
+        #[cfg(target_os = "macos")]
+        return Self::libarchive(path);
+        #[cfg(target_os = "linux")]
+        if crate::archive::available() {
+            return Self::libarchive(path);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let listing = crate::portable::archives::Book::open(path, is_image_name)?;
+            if listing.pages.is_empty() {
+                return Err(format!("{} has no page images", stem(path)));
+            }
+            let mut book = Book::new(path, listing.pages, Kind::PureArchive(Mutex::new(listing.book)));
+            book.hints.mode = listing.comic_info.and_then(|x| comic_info_mode(&x));
+            Ok(book)
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn libarchive(path: &Path) -> Result<Book, String> {
         let listing = crate::archive::Book::open(path, is_image_name)?;
         if listing.pages.is_empty() {
             return Err(format!("{} has no page images", stem(path)));
@@ -348,9 +376,8 @@ impl Book {
         Ok(book)
     }
 
-    #[cfg(target_os = "macos")]
     fn pdf(path: &Path) -> Result<Book, String> {
-        let pdf = crate::native::Pdf::open(path)?;
+        let pdf = PdfEngine::open(path)?;
         if pdf.pages() == 0 {
             return Err(format!("{} has no pages", stem(path)));
         }
@@ -367,48 +394,29 @@ impl Book {
         Self::text(path, vec![Block::Words(text)], None)
     }
 
-    #[cfg(target_os = "macos")]
     fn text(path: &Path, blocks: Vec<Block>, pictures: Option<ZipArchive<BufReader<File>>>) -> Result<Book, String> {
-        Ok(Self::from_text(path, crate::native::Text::from_blocks(blocks)?, pictures))
+        Ok(Self::from_text(path, TextEngine::from_blocks(blocks)?, pictures))
     }
 
-    #[cfg(target_os = "macos")]
+    /// RTF, Word, OpenDocument and HTML: imported with their formatting by
+    /// AppKit on a Mac; elsewhere their words and paragraphs, read by Leaf.
     fn document(path: &Path) -> Result<Book, String> {
-        Ok(Self::from_text(path, crate::native::Text::from_document(path)?, None))
+        #[cfg(target_os = "macos")]
+        let text = TextEngine::from_document(path)?;
+        #[cfg(not(target_os = "macos"))]
+        let text = TextEngine::from_blocks(vec![Block::Words(crate::portable::docs::text(path)?)])?;
+        Ok(Self::from_text(path, text, None))
     }
 
-    #[cfg(target_os = "macos")]
-    fn from_text(path: &Path, text: crate::native::Text, pictures: Option<ZipArchive<BufReader<File>>>) -> Book {
+    fn from_text(path: &Path, text: TextEngine, pictures: Option<ZipArchive<BufReader<File>>>) -> Book {
         let mut book = Book::new(path, Vec::new(), Kind::Text(text, pictures.map(Mutex::new)));
         book.hints.text = true;
         book
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    fn archive(_: &Path) -> Result<Book, String> {
-        Err(mac_only("RAR, 7-Zip and TAR comics"))
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn pdf(_: &Path) -> Result<Book, String> {
-        Err(mac_only("PDFs"))
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn text(_: &Path, _: Vec<Block>, _: Option<ZipArchive<BufReader<File>>>) -> Result<Book, String> {
-        Err(mac_only("Text books"))
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn document(_: &Path) -> Result<Book, String> {
-        Err(mac_only("Documents"))
-    }
-
     /// One page. Pictures come back as their file's bytes; PDF and text
     /// pages come back drawn at `target`. Called from the page loader only.
     pub fn page(&self, page: usize, target: Target) -> Result<Page, String> {
-        #[cfg(not(target_os = "macos"))]
-        let _ = target;
         let name = self.names.get(page).map(String::as_str).unwrap_or("");
         match &self.kind {
             Kind::Folder(paths) => {
@@ -422,12 +430,12 @@ impl Book {
             Kind::Zip(archive) => zip_entry(archive, name).map(Page::Bytes),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             Kind::Archive(archive) => archive.lock().unwrap_or_else(|e| e.into_inner()).read(page).map(Page::Bytes).map_err(|e| format!("{name}: {e}")),
-            #[cfg(target_os = "macos")]
+            #[cfg(not(target_os = "macos"))]
+            Kind::PureArchive(archive) => archive.lock().unwrap_or_else(|e| e.into_inner()).read(page).map(Page::Bytes).map_err(|e| format!("{name}: {e}")),
             Kind::Pdf(pdf) => pdf.render(page, target).map(Page::Drawn),
-            #[cfg(target_os = "macos")]
             Kind::Text(text, pictures) => match text.render(page, target)? {
-                crate::native::TextPage::Words(img) => Ok(Page::Drawn(img)),
-                crate::native::TextPage::Picture(name) => match pictures {
+                TextPage::Words(img) => Ok(Page::Drawn(img)),
+                TextPage::Picture(name) => match pictures {
                     Some(zip) => zip_entry(zip, &name).map(Page::Bytes),
                     None => Err(format!("{name}: missing")),
                 },

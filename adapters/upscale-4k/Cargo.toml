@@ -1,0 +1,18 @@
+[package]
+name = "upscale-4k"
+version = "0.1.0"
+edition = "2024"
+description = "A Leaf adapter that upscales comic and manga pages on the GPU, in the spirit of Anime4K."
+license = "MIT"
+
+[dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "metal", "vulkan", "dx12", "std"] }
+pollster = "0.4"
+serde_json = "1"
+bytemuck = { version = "1", features = ["derive"] }
+memmap2 = "0.9"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

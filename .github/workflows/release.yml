@@ -1,8 +1,10 @@
-# Builds and tests Leaf on macOS (Apple Silicon and Intel), Windows and
-# Linux, and checks that each download really opens books, RAR included.
-# Pushing a tag like v0.0.3 also publishes a GitHub release with the
-# downloads, using docs/releases/<tag>.md as the notes; any other push runs
-# the same checks without releasing.
+# Builds and tests Leaf on every system it runs on: macOS (Apple Silicon and
+# Intel), Windows (x64 and Arm) and Linux (x64 and Arm). Each download is
+# checked by opening a book in every format with it, and the adapters in
+# adapters/ are built and self-tested on each machine's GPU. Pushing a tag
+# like v0.0.4 also publishes a GitHub release with everything, using
+# docs/releases/<tag>.md as the notes; any other push runs the same checks
+# without releasing.
 name: Release
 
 on:
@@ -14,9 +16,13 @@ on:
 permissions:
   contents: write
 
+env:
+  # pdfium (Windows and Linux draw PDFs with it), from pdfium-binaries.
+  PDFIUM_TAG: chromium/8076
+
 jobs:
   # A real RAR book, made with RARLAB's rar (Ubuntu packages it; Homebrew
-  # dropped it in 2026), for the Mac jobs to open too.
+  # dropped it in 2026).
   rar-book:
     runs-on: ubuntu-22.04
     steps:
@@ -25,15 +31,37 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: |
           sudo apt-get update && sudo apt-get install -y rar
-          scripts/test-books.sh
+          cargo run --quiet --release --example sample
+          mkdir -p pages && (cd pages && unzip -q "../samples/Demo Manga.cbz")
+          (cd pages && rar a -r -idq ../manga.cbr .)
       - uses: actions/upload-artifact@v4
         with:
           name: rar-book
-          path: test-books/manga.cbr
+          path: manga.cbr
+          if-no-files-found: error
+
+  # A book in every format, made on a Mac (textutil and cupsfilter write the
+  # documents), with the RAR added.
+  books:
+    needs: rar-book
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/test-books.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: rar-book
+          path: test-books
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-books
+          path: test-books
           if-no-files-found: error
 
   mac:
-    needs: rar-book
+    needs: books
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,32 +69,49 @@ jobs:
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
+      - name: pdfium, to test the Windows and Linux PDF code here too
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p pdfium && cd pdfium
+          gh release download "$PDFIUM_TAG" --repo bblanchon/pdfium-binaries -p pdfium-mac-arm64.tgz
+          tar xzf pdfium-mac-arm64.tgz
       - name: Test
-        run: cargo test
-      - name: Package
-        run: scripts/package.sh
+        env:
+          LEAF_REQUIRE_PDFIUM: "1"
+        run: LEAF_PDFIUM=$PWD/pdfium/lib/libpdfium.dylib cargo test
+      - name: Package Leaf and the adapters
+        run: |
+          scripts/package.sh
+          scripts/package-adapter.sh upscale-4k
       - uses: actions/download-artifact@v4
         with:
-          name: rar-book
-          path: rar-book
-      - name: Check that the download opens every kind of book
+          name: test-books
+          path: test-books
+      - name: Check that each download opens every kind of book
         run: |
           set -e
-          scripts/test-books.sh
-          cp rar-book/manga.cbr test-books/
-          ditto -x -k dist/Leaf-*-macos-universal.zip x
-          app=x/Leaf.app/Contents/MacOS/leaf
-          archs=$(lipo -archs "$app"); echo "archs: $archs"
-          case "$archs" in *x86_64*arm64*|*arm64*x86_64*) ;; *) echo "not universal"; exit 1 ;; esac
-          "$app" --version
-          for f in test-books/*; do "$app" --check "$f"; done
+          for zip in dist/Leaf-*-macos-*.zip; do
+            rm -rf x && ditto -x -k "$zip" x
+            app=x/Leaf.app/Contents/MacOS/leaf
+            echo "== $zip: $(lipo -archs "$app")"
+            case "$zip" in *universal*) lipo -archs "$app" | grep -q x86_64 && lipo -archs "$app" | grep -q arm64 ;; esac
+            "$app" --version
+            case "$zip" in *x64*) continue ;; esac
+            for f in test-books/*; do "$app" --check "$f"; done
+          done
+      - name: Self-test the upscaler on this GPU
+        run: |
+          rm -rf a && mkdir a && cd a && unzip -q ../dist/upscale-4k-*-macos-universal.zip
+          ./upscale-4k/upscale-4k --selftest
+          ./upscale-4k/upscale-4k --bench
       - uses: actions/upload-artifact@v4
         with:
           name: leaf-macos
           path: dist/*
           if-no-files-found: error
 
-  # The Intel half of the Mac download, run on an Intel Mac.
+  # The Intel Mac downloads, on an Intel Mac.
   intel:
     needs: mac
     runs-on: macos-15-intel
@@ -75,50 +120,89 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test, built for Intel
-        run: cargo test
+        run: |
+          brew install nasm
+          cargo test
       - uses: actions/download-artifact@v4
         with:
           name: leaf-macos
           path: dist
       - uses: actions/download-artifact@v4
         with:
-          name: rar-book
-          path: rar-book
-      - name: Check that the download's Intel half opens every kind of book
+          name: test-books
+          path: test-books
+      - name: Check that the Intel and universal downloads open every kind of book
         run: |
           set -e
           uname -m
-          scripts/test-books.sh
-          cp rar-book/manga.cbr test-books/
-          ditto -x -k dist/Leaf-*-macos-universal.zip x
-          app=x/Leaf.app/Contents/MacOS/leaf
-          arch -x86_64 "$app" --version
-          for f in test-books/*; do arch -x86_64 "$app" --check "$f"; done
+          for zip in dist/Leaf-*-macos-x64.zip dist/Leaf-*-macos-universal.zip; do
+            rm -rf x && ditto -x -k "$zip" x
+            echo "== $zip"
+            for f in test-books/*; do arch -x86_64 x/Leaf.app/Contents/MacOS/leaf --check "$f"; done
+          done
+      - name: Self-test the upscaler on this GPU
+        run: |
+          rm -rf a && mkdir a && cd a && unzip -q ../dist/upscale-4k-*-macos-universal.zip
+          arch -x86_64 ./upscale-4k/upscale-4k --selftest
 
   windows:
-    runs-on: windows-latest
+    needs: books
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, arch: x64 }
+          - { os: windows-11-arm, arch: arm64 }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The AVIF decoder's x86 assembly.
+      - uses: ilammy/setup-nasm@v1
+        if: matrix.arch == 'x64'
+      - name: pdfium
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p pdfium && cd pdfium
+          gh release download "$PDFIUM_TAG" --repo bblanchon/pdfium-binaries -p "pdfium-win-${{ matrix.arch }}.tgz"
+          tar xzf "pdfium-win-${{ matrix.arch }}.tgz"
       - name: Test
-        run: cargo test
-      - name: Package
+        shell: bash
+        env:
+          LEAF_REQUIRE_PDFIUM: "1"
+        run: LEAF_PDFIUM="$PWD/pdfium/bin/pdfium.dll" cargo test
+      - name: Package Leaf and the adapters
+        shell: bash
+        run: |
+          PDFIUM_DIR="$PWD/pdfium" scripts/package.sh
+          scripts/package-adapter.sh upscale-4k
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-books
+          path: test-books
+      - name: Check that the download opens every kind of book
         shell: pwsh
         run: |
-          cargo build --release
-          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
-          New-Item -ItemType Directory -Force stage, dist | Out-Null
-          Copy-Item target\release\leaf.exe stage\Leaf.exe
-          Copy-Item README.md, LICENSE stage\
-          Compress-Archive -Path stage\* -DestinationPath "dist\Leaf-$v-windows-x64.zip"
-      - name: Check that it opens a book, and take screenshots
-        timeout-minutes: 5
+          New-Item -ItemType Directory -Force x | Out-Null
+          Expand-Archive -Force (Get-ChildItem dist\Leaf-*-windows-*.zip).FullName x
+          foreach ($f in Get-ChildItem test-books) {
+            $p = Start-Process -FilePath x\Leaf.exe -ArgumentList '--check', ('"' + $f.FullName + '"') -Wait -PassThru -NoNewWindow
+            if ($p.ExitCode -ne 0) { throw "--check failed on $($f.Name): $($p.ExitCode)" }
+            Write-Output "ok $($f.Name)"
+          }
+      - name: Self-test the upscaler on this GPU (WARP, the software one, on a runner)
+        shell: bash
+        run: |
+          rm -rf a && mkdir a && cd a && unzip -q ../dist/upscale-4k-*-windows-*.zip
+          ./upscale-4k/upscale-4k.exe --selftest
+          ./upscale-4k/upscale-4k.exe --bench
+      - name: Screenshots
+        if: matrix.arch == 'x64'
         shell: pwsh
         run: |
-          cargo run --quiet --release --example sample
-          $p = Start-Process -FilePath stage\Leaf.exe -ArgumentList '--check', '"samples\Demo Manga.cbz"' -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "--check failed: $($p.ExitCode)" }
           New-Item -ItemType Directory -Force shots, cfg | Out-Null
           $env:LEAF_CONFIG_DIR = "$PWD\cfg"
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -129,60 +213,79 @@ jobs:
             $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
             $img.Save("shots\$name.png")
           }
-          $p = Start-Process -FilePath stage\Leaf.exe -ArgumentList '"samples\Demo Manga.cbz"' -PassThru
-          Start-Sleep 8
-          Shot "1-manga"
-          $wshell = New-Object -ComObject wscript.shell
-          $null = $wshell.AppActivate($p.Id)
-          Start-Sleep 1
-          [System.Windows.Forms.SendKeys]::SendWait("{LEFT}")
-          Start-Sleep 1
-          Shot "2-next-spread"
-          [System.Windows.Forms.SendKeys]::SendWait("%f")
-          Start-Sleep 1
-          Shot "3-file-menu"
-          Stop-Process -Id $p.Id
+          foreach ($book in "manga.cbr", "novel.docx", "page.pdf") {
+            $p = Start-Process -FilePath x\Leaf.exe -ArgumentList ('"' + (Resolve-Path "test-books\$book") + '"') -PassThru
+            Start-Sleep 6
+            Shot $book
+            Stop-Process -Id $p.Id
+          }
       - uses: actions/upload-artifact@v4
         with:
-          name: leaf-windows
+          name: leaf-windows-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && matrix.arch == 'x64'
         with:
           name: screenshots-windows
           path: shots/
 
   linux:
-    runs-on: ubuntu-22.04   # an older glibc, so it runs on more distros
+    needs: books
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, arch: x64 }
+          - { os: ubuntu-22.04-arm, arch: arm64 }
+    runs-on: ${{ matrix.os }}   # an older glibc, so it runs on more distros
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Dependencies (libarchive is found at run time, for RAR, 7-Zip and TAR)
+      - name: Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libarchive13 libarchive-tools rar libxkbcommon-x11-0 xvfb xdotool imagemagick openbox
+          # libarchive and libheif are found at run time; lavapipe is a
+          # software Vulkan GPU for the upscaler's self-test.
+          sudo apt-get install -y libarchive13 libarchive-tools libheif1 libxkbcommon-x11-0 mesa-vulkan-drivers \
+            xvfb xdotool imagemagick openbox
+          if [ "${{ matrix.arch }}" = x64 ]; then sudo apt-get install -y nasm rar; fi
+      - name: pdfium
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p pdfium && cd pdfium
+          gh release download "$PDFIUM_TAG" --repo bblanchon/pdfium-binaries -p "pdfium-linux-${{ matrix.arch }}.tgz"
+          tar xzf "pdfium-linux-${{ matrix.arch }}.tgz"
       - name: Test
         env:
-          LEAF_REQUIRE_RAR: "1"
-        run: cargo test
-      - name: Package
+          LEAF_REQUIRE_PDFIUM: "1"
+        run: |
+          if [ "${{ matrix.arch }}" = x64 ]; then export LEAF_REQUIRE_RAR=1; fi
+          LEAF_PDFIUM=$PWD/pdfium/lib/libpdfium.so cargo test
+      - name: Package Leaf and the adapters
+        run: |
+          PDFIUM_DIR=$PWD/pdfium scripts/package.sh
+          scripts/package-adapter.sh upscale-4k
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-books
+          path: test-books
+      - name: Check that the download opens every kind of book
         run: |
           set -e
-          cargo build --release
-          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          d=leaf-$v-linux-x64
-          mkdir -p "stage/$d" dist
-          cp target/release/leaf README.md LICENSE "stage/$d/"
-          tar -czf "dist/$d.tar.gz" -C stage "$d"
-      - name: Check that it opens every kind of book it reads here
+          mkdir -p x && tar xzf dist/leaf-*-linux-*.tar.gz -C x
+          leaf=$(echo x/leaf-*/leaf)
+          "$leaf" --version
+          for f in test-books/*; do "$leaf" --check "$f"; done
+      - name: Self-test the upscaler on this GPU (lavapipe, the software one, on a runner)
         run: |
-          set -e
-          scripts/test-books.sh
-          ./target/release/leaf --version
-          for f in test-books/*.cb*; do ./target/release/leaf --check "$f"; done
+          rm -rf a && mkdir a && cd a && unzip -q ../dist/upscale-4k-*-linux-*.zip
+          ./upscale-4k/upscale-4k --selftest
+          ./upscale-4k/upscale-4k --bench
       - name: Screenshots
+        if: matrix.arch == 'x64'
         timeout-minutes: 3
         run: |
           mkdir -p shots cfg
@@ -191,20 +294,21 @@ jobs:
           sleep 2
           openbox &
           sleep 1
-          ./target/release/leaf "samples/Demo Webtoon.cbz" &
-          sleep 6
-          W=$(timeout 20 xdotool search --sync --name Leaf | head -1)
-          xdotool windowactivate --sync "$W" || true
-          import -window root shots/1-webtoon.png
-          xdotool key space; sleep 1
-          import -window root shots/2-scrolled.png
+          leaf=$(echo x/leaf-*/leaf)
+          for book in manga.cb7 novel.odt page.pdf; do
+            "$leaf" "test-books/$book" &
+            pid=$!
+            sleep 5
+            import -window root "shots/$book.png"
+            kill $pid
+          done
       - uses: actions/upload-artifact@v4
         with:
-          name: leaf-linux
+          name: leaf-linux-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && matrix.arch == 'x64'
         with:
           name: screenshots-linux
           path: shots/

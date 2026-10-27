@@ -30,6 +30,8 @@ pub struct View {
     pub rtl: bool,
     pub fit_width: bool,
     pub magnifier: bool,
+    /// Upscaling, when an upscaler adapter is installed: on or off.
+    pub upscale: Option<bool>,
 }
 
 /// The menu text for a built-in command.
@@ -56,6 +58,7 @@ fn label(command: &str) -> &'static str {
         "edit-keys" => "Edit Key Bindings",
         "edit-settings" => "Edit Settings",
         "toggle-magnifier" => "Magnifier",
+        "toggle-upscale" => "Upscale Pages",
         "go-to-page" => "Go to Page…",
         "next-book" => "Next Book in Folder",
         "prev-book" => "Previous Book in Folder",
@@ -191,7 +194,8 @@ mod bar {
             file.append_items(&[&sep(), &b.item("quit", "Exit", true)]).expect("menu builds");
 
             let view = Submenu::new("View", true);
-            let checks: Vec<(String, CheckMenuItem)> = CHECKS.iter().map(|c| (c.to_string(), b.check(c, checked(&content.view, c), book))).collect();
+            let checks: Vec<(String, CheckMenuItem)> =
+                CHECKS.iter().map(|c| (c.to_string(), b.check(c, checked(&content.view, c), enabled(&content.view, c)))).collect();
             let item = |c: &str| &checks.iter().find(|(name, _)| name == c).expect("listed").1;
             view.append_items(&[
                 item("mode-comic"),
@@ -203,6 +207,7 @@ mod bar {
                 item("toggle-rtl"),
                 item("toggle-fit"),
                 item("toggle-magnifier"),
+                item("toggle-upscale"),
                 &sep(),
                 &b.builtin("fullscreen", true),
             ])
@@ -286,13 +291,20 @@ mod bar {
         pub fn sync(&self, view: &View) {
             for (command, item) in &self.checks {
                 item.set_checked(checked(view, command));
-                item.set_enabled(view.has_book);
+                item.set_enabled(enabled(view, command));
             }
         }
     }
 
-    const CHECKS: [&str; 8] =
-        ["mode-comic", "mode-manga", "mode-webtoon", "toggle-spreads", "pair-cover", "toggle-rtl", "toggle-fit", "toggle-magnifier"];
+    const CHECKS: [&str; 9] = [
+        "mode-comic", "mode-manga", "mode-webtoon", "toggle-spreads", "pair-cover", "toggle-rtl", "toggle-fit", "toggle-magnifier",
+        "toggle-upscale",
+    ];
+
+    /// Upscaling needs an upscaler adapter; the rest, a book.
+    fn enabled(view: &View, command: &str) -> bool {
+        if command == "toggle-upscale" { view.upscale.is_some() } else { view.has_book }
+    }
 
     fn checked(view: &View, command: &str) -> bool {
         match command {
@@ -304,6 +316,7 @@ mod bar {
             "toggle-rtl" => view.rtl,
             "toggle-fit" => view.fit_width,
             "toggle-magnifier" => view.magnifier,
+            "toggle-upscale" => view.upscale == Some(true),
             _ => false,
         }
     }

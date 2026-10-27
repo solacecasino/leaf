@@ -4,6 +4,7 @@
 //! nothing to do, it lays out more of a text book.
 
 use crate::book::{Book, Page};
+use crate::upscale::{Style, Upscaler};
 use crate::state::Fit;
 use image::RgbImage;
 use std::collections::VecDeque;
@@ -85,6 +86,10 @@ struct Job {
     book: Option<(u64, Arc<Book>)>,
     wanted: VecDeque<(Piece, Target)>,
     busy: Option<(u64, Piece, Target)>,
+    /// An upscaler adapter to make enlarged pictures with, and how; and a
+    /// count of changes to it, so pictures made before a change aren't reused.
+    upscaler: Option<(Arc<Upscaler>, Style)>,
+    upscaler_changes: u64,
 }
 
 type Shared = Arc<(Mutex<Job>, Condvar)>;
@@ -115,10 +120,26 @@ impl Loader {
         job.wanted = pieces.into_iter().filter(|&(p, t)| busy != Some((id, p, t))).collect();
         cv.notify_one();
     }
+
+    /// Makes enlarged pictures with `upscaler` from now on (or Leaf's own
+    /// scaler, with None).
+    pub fn set_upscaler(&self, upscaler: Option<(Arc<Upscaler>, Style)>) {
+        let mut job = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
+        let same = match (&job.upscaler, &upscaler) {
+            (Some((a, s)), Some((b, t))) => Arc::ptr_eq(a, b) && s == t && a.usable() == b.usable(),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            job.upscaler = upscaler;
+            job.upscaler_changes += 1;
+        }
+    }
 }
 
 struct Made {
     id: u64,
+    changes: u64,
     piece: Piece,
     target: Target,
     image: Weak<Scaled>,
@@ -135,7 +156,7 @@ struct Decoded {
 }
 
 enum Work {
-    Piece(u64, Arc<Book>, Piece, Target),
+    Piece(u64, Arc<Book>, Piece, Target, Option<(Arc<Upscaler>, Style)>, u64),
     Grow(u64, Arc<Book>),
 }
 
@@ -156,7 +177,7 @@ fn work(shared: Shared, deliver: impl Fn(Loaded) -> bool) {
                 if let Some((id, book)) = job.book.clone() {
                     if let Some((piece, target)) = job.wanted.pop_front() {
                         job.busy = Some((id, piece, target));
-                        break Work::Piece(id, book, piece, target);
+                        break Work::Piece(id, book, piece, target, job.upscaler.clone(), job.upscaler_changes);
                     }
                     if !book.complete() {
                         break Work::Grow(id, book);
@@ -165,7 +186,7 @@ fn work(shared: Shared, deliver: impl Fn(Loaded) -> bool) {
                 job = cv.wait(job).unwrap_or_else(|e| e.into_inner());
             }
         };
-        let (id, book, piece, target) = match next {
+        let (id, book, piece, target, upscaler, changes) = match next {
             Work::Grow(id, book) => {
                 // A text book being read: lay out a few more pages, then
                 // look for wanted pages again.
@@ -178,9 +199,9 @@ fn work(shared: Shared, deliver: impl Fn(Loaded) -> bool) {
                 }
                 continue;
             }
-            Work::Piece(id, book, piece, target) => (id, book, piece, target),
+            Work::Piece(id, book, piece, target, upscaler, changes) => (id, book, piece, target, upscaler, changes),
         };
-        let earlier = made.iter().find(|m| (m.id, m.piece, m.target) == (id, piece, target));
+        let earlier = made.iter().find(|m| (m.id, m.piece, m.target, m.changes) == (id, piece, target, changes));
         if let Some((image, info)) = earlier.and_then(|m| Some((m.image.upgrade()?, m.info))) {
             if !deliver(Loaded::Page(Done { book: id, piece, target, image: Ok(image), info })) {
                 return;
@@ -191,18 +212,25 @@ fn work(shared: Shared, deliver: impl Fn(Loaded) -> bool) {
         let page = piece.0;
         // A broken image must never take the reader down with it.
         let result = catch_unwind(AssertUnwindSafe(|| {
-            load(&mut decoded, id, &book, page, target).map(|(img, info)| {
+            load(&mut decoded, id, &book, page, target).map(|(img, info, drawn)| {
                 let rows = match piece.1 {
-                    Part::Band(i) => Some((i * BAND, (i + 1) * BAND)),
+                    Part::Band(i) => Some(crate::upscale::band_rows(i)),
                     Part::Whole | Part::Zoom => None,
                 };
-                (Arc::new(scale(&img, target, rows)), info)
+                // A picture shown bigger than it is goes to the upscaler,
+                // when there is one; anything it can't do, Leaf does.
+                let (w, h) = scaled_size(img.width(), img.height(), target);
+                let upscaled = match &upscaler {
+                    Some((u, style)) if !drawn && w > img.width() && u.usable() => u.run(&img, w, h, rows, *style).ok(),
+                    _ => None,
+                };
+                (Arc::new(upscaled.unwrap_or_else(|| scale(&img, target, rows))), info)
             })
         }))
         .unwrap_or_else(|_| Err(format!("{}: the decoder crashed", book.page_name(page))));
         let (image, info) = match result {
             Ok((image, info)) => {
-                made.push_back(Made { id, piece, target, image: Arc::downgrade(&image), info: Some(info) });
+                made.push_back(Made { id, changes, piece, target, image: Arc::downgrade(&image), info: Some(info) });
                 if made.len() > 24 {
                     made.pop_front();
                 }
@@ -219,10 +247,12 @@ fn work(shared: Shared, deliver: impl Fn(Loaded) -> bool) {
     }
 }
 
-fn load(decoded: &mut VecDeque<Decoded>, id: u64, book: &Book, page: usize, target: Target) -> Result<(Arc<RgbImage>, PageInfo), String> {
+/// A page decoded (or drawn at `target`, the last value true), and what
+/// it's like.
+fn load(decoded: &mut VecDeque<Decoded>, id: u64, book: &Book, page: usize, target: Target) -> Result<(Arc<RgbImage>, PageInfo, bool), String> {
     let kept = decoded.iter().find(|d| d.id == id && d.page == page && d.drawn_for.is_none_or(|t| t == target));
     if let Some(d) = kept {
-        return Ok((d.image.clone(), d.info));
+        return Ok((d.image.clone(), d.info, d.drawn_for.is_some()));
     }
     let (image, drawn_for) = match book.page(page, target)? {
         // Drawn at the size it's shown; kept only for the other bands of
@@ -235,7 +265,7 @@ fn load(decoded: &mut VecDeque<Decoded>, id: u64, book: &Book, page: usize, targ
     while decoded.len() > DECODED_KEPT {
         decoded.pop_front();
     }
-    Ok((image, info))
+    Ok((image, info, drawn_for.is_some()))
 }
 
 /// Decodes a picture with Leaf's own decoders, within limits a hostile file
@@ -250,11 +280,12 @@ pub fn decode(bytes: &[u8]) -> Result<RgbImage, String> {
     match reader.decode() {
         Ok(img) => Ok(img.into_rgb8()),
         Err(e) => {
+            // The system's decoders on a Mac; Leaf's own for the rest elsewhere.
             #[cfg(target_os = "macos")]
-            if let Ok(img) = crate::native::decode(bytes) {
-                return Ok(img);
-            }
-            Err(e.to_string())
+            let more = crate::native::decode(bytes);
+            #[cfg(not(target_os = "macos"))]
+            let more = crate::portable::images::decode(bytes);
+            more.map_err(|more| if matches!(e, image::ImageError::Unsupported(_)) { more } else { e.to_string() })
         }
     }
 }
@@ -367,6 +398,12 @@ fn scale(img: &RgbImage, t: Target, rows: Option<(u32, u32)>) -> Scaled {
         }));
     }
     Scaled { w, h: r1 - r0, px }
+}
+
+/// Leaf's own scaler, for comparing the upscaler with.
+#[cfg(test)]
+pub fn scale_for_test(img: &RgbImage, t: Target) -> Scaled {
+    scale(img, t, None)
 }
 
 #[cfg(test)]

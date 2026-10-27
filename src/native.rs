@@ -378,11 +378,7 @@ enum Part {
     Picture(String),
 }
 
-/// One page of a text book: words to draw, or a picture to show.
-pub enum TextPage {
-    Words(RgbImage),
-    Picture(String),
-}
+use crate::book::TextPage;
 
 // SAFETY: every Core Foundation object here is used with `inner` locked.
 unsafe impl Send for Inner {}
