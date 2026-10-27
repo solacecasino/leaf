@@ -26,12 +26,12 @@ case "$(uname -s)" in
     cp "$src/target/release/$name.exe" "$stage/"
     # Windows programs end in .exe.
     sed -i "s|^run = \[\"./$name\"\]|run = [\"./$name.exe\"]|" "$stage/adapter.toml"
-    case "$PROCESSOR_ARCHITECTURE" in ARM64) platform=windows-arm64 ;; *) platform=windows-x64 ;; esac
+    case "$(rustc -vV | sed -n 's/^host: //p')" in aarch64*) platform=windows-arm64 ;; *) platform=windows-x64 ;; esac  # not the shell's: Git Bash is x64 on Arm
     ;;
   *)
     cargo build --release --manifest-path "$src/Cargo.toml"
     cp "$src/target/release/$name" "$stage/"
-    case "$(uname -m)" in aarch64|arm64) platform=linux-arm64 ;; *) platform=linux-x64 ;; esac
+    case "$(rustc -vV | sed -n 's/^host: //p')" in aarch64*) platform=linux-arm64 ;; *) platform=linux-x64 ;; esac
     ;;
 esac
 out="dist/$name-$VERSION-$platform.zip"

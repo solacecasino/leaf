@@ -10,9 +10,11 @@ cd "$(dirname "$0")/.."
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 mkdir -p dist
 
+# What cargo builds for, not what the shell says: on Arm Windows, Git Bash
+# is an x64 program and reports x64.
 arch() {
-  case "$(uname -m)$PROCESSOR_ARCHITECTURE" in
-    *arm64*|*aarch64*|*ARM64*) echo arm64 ;;
+  case "$(rustc -vV | sed -n 's/^host: //p')" in
+    aarch64*) echo arm64 ;;
     *) echo x64 ;;
   esac
 }

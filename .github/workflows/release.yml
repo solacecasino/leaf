@@ -182,6 +182,9 @@ jobs:
         run: |
           PDFIUM_DIR="$PWD/pdfium" scripts/package.sh
           scripts/package-adapter.sh upscale-4k
+          # Every file named for this machine, or the release would mix them up.
+          ls dist
+          for f in dist/*; do case "$f" in *-${{ matrix.arch }}.*) ;; *) echo "::error::$f isn't named ${{ matrix.arch }}"; exit 1 ;; esac; done
       - uses: actions/download-artifact@v4
         with:
           name: test-books
@@ -274,6 +277,9 @@ jobs:
         run: |
           PDFIUM_DIR=$PWD/pdfium scripts/package.sh
           scripts/package-adapter.sh upscale-4k
+          # Every file named for this machine, or the release would mix them up.
+          ls dist
+          for f in dist/*; do case "$f" in *-${{ matrix.arch }}.*) ;; *) echo "::error::$f isn't named ${{ matrix.arch }}"; exit 1 ;; esac; done
       - uses: actions/download-artifact@v4
         with:
           name: test-books
@@ -332,7 +338,14 @@ jobs:
         with:
           path: dist
           pattern: leaf-*
-          merge-multiple: true
+      - name: Gather, refusing two files with the same name
+        run: |
+          mkdir out
+          for f in dist/*/*; do
+            [ -e "out/${f##*/}" ] && { echo "::error::two builds made ${f##*/}"; exit 1; }
+            mv "$f" out/
+          done
+          ls -l out
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -340,4 +353,4 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           notes="docs/releases/${tag}.md"
           if [ -f "$notes" ]; then set -- --notes-file "$notes"; else set -- --generate-notes; fi
-          gh release create "$tag" dist/* --title "Leaf ${tag#v}" "$@"
+          gh release create "$tag" out/* --title "Leaf ${tag#v}" "$@"
