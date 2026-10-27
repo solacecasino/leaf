@@ -21,7 +21,11 @@ Download from [Releases](https://github.com/solacecasino/leaf/releases):
   `xattr -dr com.apple.quarantine /Applications/Leaf.app`.)
 - **Windows**: unzip it and run **Leaf.exe** (keep `pdfium.dll` beside it:
   it draws PDFs). SmartScreen may ask once, since Leaf isn't signed:
-  **More info → Run anyway**.
+  **More info → Run anyway**. Double-click `install.cmd` in the same
+  folder to put Leaf, with its icon, under **Open with** for books and
+  images and "Open in Leaf" on folders, and to open comic archives in Leaf
+  unless another app already does (`install.cmd --remove` takes it out
+  again; only your own account's settings change, no administrator needed).
 - **Linux**: unpack it and run `leaf` (keep `libpdfium.so` beside it).
   `./install.sh` in the same folder adds Leaf to your app menu with its
   icon, offers it under **Open With** for books and images, and opens comic
