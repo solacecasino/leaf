@@ -276,6 +276,8 @@ struct App {
     wheel_settling: Option<Instant>,
     pinch: f64,
     started: Instant,
+    /// When the page was last turned, for LEAF_TIMING.
+    turned: Option<Instant>,
 }
 
 impl App {
@@ -319,6 +321,7 @@ impl App {
             wheel_settling: Some(Instant::now()),
             pinch: 0.0,
             started: Instant::now(),
+            turned: None,
         };
         if let Some(crash) = log::last_crash() {
             log::push("leaf", format!("Leaf ran into a bug last time: {crash}"));
@@ -909,6 +912,13 @@ impl App {
         o.at.page = page;
         o.at.scroll = scroll;
         self.moved();
+        if let Some(o) = &self.open
+            && std::env::var_os("LEAF_TIMING").is_some()
+        {
+            let ready = o.shown().iter().all(|&p| o.cache.contains_key(&(p, Part::Whole)));
+            eprintln!("leaf: turned to page {}, {}", page + 1, if ready { "ready" } else { "not ready yet" });
+            self.turned = Some(Instant::now());
+        }
     }
 
     /// Scrolls by `dy` pixels; returns false when already at that end.
@@ -1462,7 +1472,10 @@ impl App {
         if o.wanted.get(&done.piece) == Some(&done.target) {
             let shown = o.mode() == Mode::Webtoon || o.shown().contains(&page);
             if shown && std::env::var_os("LEAF_TIMING").is_some() {
-                eprintln!("leaf: page {} on screen {:?} after start", page + 1, self.started.elapsed());
+                match self.turned {
+                    Some(t) => eprintln!("leaf: page {} on screen {:?} after the turn", page + 1, t.elapsed()),
+                    None => eprintln!("leaf: page {} on screen {:?} after start", page + 1, self.started.elapsed()),
+                }
             }
             if done.image.is_ok() {
                 o.stale.remove(&done.piece);
