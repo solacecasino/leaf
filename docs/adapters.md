@@ -13,10 +13,12 @@ An adapter can:
 - **open books Leaf can't read itself**, such as `.cbr` or PDF: Leaf asks it
   for the page list, then for each page's image;
 - **follow along**: be told when a book opens or the page changes, and ask
-  Leaf which book is open or to turn the page.
+  Leaf which book is open or to turn the page;
+- **upscale pages** (protocol 3): make the bigger picture whenever Leaf
+  shows a page bigger than it is, for example on the GPU.
 
-There are no adapters yet. Leaf reads most formats itself now (RAR, 7-Zip,
-PDF, EPUB, text), so adapters are for the rest, and for adding commands.
+Leaf ships with none. [The catalog](../adapters/README.md) lists the ones
+built with Leaf, such as [Upscale 4K](../adapters/upscale-4k/).
 
 ## Installing
 
@@ -49,6 +51,7 @@ permissions = ["book.read"]
 start = "command"               # "command" (default) or "launch"
 events = ["opened", "page"]     # events to receive while running
 opens = ["cbr"]                 # file extensions this adapter opens as books
+# filters = ["upscale"]         # upscales pages (needs "book.pages")
 
 [[commands]]
 id = "info"                     # sent back to you when chosen
@@ -78,6 +81,7 @@ keys = "cmd+alt+i"              # optional default shortcut
 |---|---|
 | `book.read` | `book.get`, and the `opened` and `page` events |
 | `book.control` | `book.goto`, `book.open` |
+| `book.pages` | Seeing pages' pixels: needed by `filters` |
 | `network` | Nothing through Leaf. It tells the user the adapter goes online |
 
 Permissions control what an adapter can do **through Leaf**. An adapter is a
@@ -104,6 +108,8 @@ Every message is one JSON object on one line, in UTF-8.
 | `shutdown` | | Notification: exit soon |
 | `book.open` | `path` | **Request**, for adapters with `opens`. Reply `{ "pages": ["001.jpg", ...], "name": "optional title" }` |
 | `book.page` | `path`, `page` (from 0), `name` (from your list) | **Request**. Reply `{ "file": "/path/to/image" }` or `{ "base64": "..." }` with JPEG, PNG, WebP, GIF or BMP bytes |
+| `upscale.ready` | | **Request**, for adapters with `filters = ["upscale"]`, sent when Leaf starts them. Get ready (set up the GPU) and reply `{ "device": "what it runs on" }`; Leaf shows that once. Until you answer, Leaf scales pages itself |
+| `page.upscale` | see below | **Request**: make one upscaled picture |
 
 Leaf asks for pages from a background thread, up to three at a time around
 the page being read, and waits up to 30 seconds for each answer.
@@ -126,10 +132,31 @@ Events:
 | `log` | `message` | `null`. Written to `leaf.log` | none |
 | `ui.confirm` | `title`, `message` | `true` or `false` from a native dialog; Return answers No | none |
 
+### Upscaling (protocol 3)
+
+An adapter with `filters = ["upscale"]` and the `book.pages` permission is
+asked for every picture Leaf shows bigger than it is (on a 4K or Retina
+screen, a webtoon widened to the window, the magnifier), while **View →
+Upscale Pages** (U) is on. Pixels don't go through the JSON pipe: they're
+in two files in a private temporary folder, which both sides can map into
+memory.
+
+| Param | |
+|---|---|
+| `input`, `width`, `height`, `format` | The source: `width`×`height` pixels, `"rgb8"` (3 bytes a pixel, rows top to bottom) |
+| `output`, `out_width`, `out_height`, `out_format` | Where to write the result: `out_width`×`out_height` pixels, `"0rgb32"` (4 bytes a pixel, little-endian `0x00RRGGBB`). The file is already that size; write into it |
+| `rect` | `[x0, y0, x1, y1]`: the part of the source, in its pixels, the output covers. A webtoon is asked for in bands, each with a few rows of source around it |
+| `style` | `"lines"` (manga and webtoon line art) or `"soft"` (colour comics), by the book's mode or `upscale_style` in settings.toml |
+
+Reply `{ "written": <bytes> }` once the output is written, or an error.
+Leaf checks `written`, waits up to 10 seconds, and on any problem scales the
+page itself and stops asking until upscaling is switched on again. Pages are
+asked for one at a time, from Leaf's page thread.
+
 ## Example exchange
 
 ```
-→ {"method":"initialize","params":{"leaf":"0.0.2","protocol":2,"permissions":[]}}
+→ {"method":"initialize","params":{"leaf":"0.0.4","protocol":3,"permissions":[]}}
 → {"id":1,"method":"book.open","params":{"path":"/Users/me/One Piece 01.cbr"}}
 ← {"id":1,"result":{"pages":["001.jpg","002.jpg"],"name":"One Piece 01"}}
 → {"id":2,"method":"book.page","params":{"path":"/Users/me/One Piece 01.cbr","page":0,"name":"001.jpg"}}
@@ -146,6 +173,8 @@ things, so an adapter written for an older version keeps working.
 - **1** (Leaf 0.0.1): commands, events, opening books.
 - **2** (Leaf 0.0.2): `mode` in `book.get`. An adapter made for version 1
   works unchanged.
+- **3** (Leaf 0.0.4): `filters = ["upscale"]`, the `book.pages` permission,
+  `upscale.ready` and `page.upscale`. Older adapters work unchanged.
 
 Leaf 0.0.2 also refuses adapters whose program was built for another kind of
 computer, ignores (and logs) any message over 96 MB, and moves a removed

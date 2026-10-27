@@ -30,7 +30,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: |
-          sudo apt-get update && sudo apt-get install -y rar
+          sudo apt-get update && sudo apt-get install -y rar nasm
           cargo run --quiet --release --example sample
           mkdir -p pages && (cd pages && unzip -q "../samples/Demo Manga.cbz")
           (cd pages && rar a -r -idq ../manga.cbr .)

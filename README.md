@@ -8,22 +8,29 @@ account, no settings window.
 
 Download from [Releases](https://github.com/solacecasino/leaf/releases):
 
-- **Mac** (Apple Silicon and Intel, macOS 11 or later):
-  `Leaf-<version>-macos-universal.zip`. Unzip it and move **Leaf.app** to
-  Applications. The first time, **right-click Leaf → Open**, then
-  **Open**: Leaf isn't signed with an Apple developer certificate, so macOS
-  asks once. (Or run `xattr -dr com.apple.quarantine /Applications/Leaf.app`.)
-- **Windows** (64-bit): `Leaf-<version>-windows-x64.zip`. Unzip it and run
-  **Leaf.exe**. Windows SmartScreen may ask once, since Leaf isn't signed:
-  **More info → Run anyway**.
-- **Linux** (x86-64): `leaf-<version>-linux-x64.tar.gz`. Unpack it and run
-  `leaf`. RAR, 7-Zip and TAR comics use the system's libarchive (the
-  `libarchive13` package, already there on most desktops). The window
-  needs `libxkbcommon` (and `libxkbcommon-x11` on X11), which every
-  desktop has.
+| System | Download |
+|---|---|
+| Mac, any (macOS 11 or later) | `Leaf-<version>-macos-universal.zip` |
+| Mac with Apple Silicon / Intel | `Leaf-<version>-macos-arm64.zip` / `-macos-x64.zip` (smaller) |
+| Windows, x64 / Arm | `Leaf-<version>-windows-x64.zip` / `-windows-arm64.zip` |
+| Linux, x86-64 / Arm | `leaf-<version>-linux-x64.tar.gz` / `-linux-arm64.tar.gz` |
 
-The Mac version reads the most: PDFs and text books use macOS's own
-renderers, so on Windows and Linux they need an adapter for now.
+- **Mac**: unzip it and move **Leaf.app** to Applications. The first time,
+  **right-click Leaf → Open**, then **Open**: Leaf isn't signed with an
+  Apple developer certificate, so macOS asks once. (Or run
+  `xattr -dr com.apple.quarantine /Applications/Leaf.app`.)
+- **Windows**: unzip it and run **Leaf.exe** (keep `pdfium.dll` beside it:
+  it draws PDFs). SmartScreen may ask once, since Leaf isn't signed:
+  **More info → Run anyway**.
+- **Linux**: unpack it and run `leaf` (keep `libpdfium.so` beside it). The
+  window needs libxkbcommon (and libxkbcommon-x11 on X11), which every
+  desktop has. RAR, 7-Zip and TAR use the system's libarchive when it's
+  there, and Leaf's own readers when it isn't; HEIC pictures need libheif.
+
+Every system reads every format below. On a Mac, macOS draws PDFs and lays
+out text with its own renderers; elsewhere Leaf does (with pdfium and
+cosmic-text). HEIC uses the system's decoder everywhere: on Windows that's
+the HEIF and HEVC extensions from the Microsoft Store, which most PCs have.
 
 ## Opening books
 
@@ -49,14 +56,15 @@ What Leaf reads (it looks at what's inside a file, then its name):
 - **EPUBs**: picture books in their own page order, novels as text with
   their illustrations on pages of their own
 - **Text books**: `.txt`, Markdown, `.rtf`, Word (`.doc`, `.docx`),
-  OpenDocument (`.odt`) and HTML, laid out into pages
+  OpenDocument (`.odt`) and HTML, laid out into pages (on a Mac with their
+  formatting; elsewhere as their words and paragraphs)
 - **Folders** of images, including chapter subfolders, or a single image
   (which opens its folder at that image)
 - Anything an installed [adapter](docs/adapters.md) opens
 
-Pages can be any image macOS can show: JPEG, PNG, WebP, GIF, BMP, HEIC,
-AVIF, JPEG XL, TIFF, PSD, camera RAW and more, in natural order (`page2`
-before `page10`).
+Pages can be JPEG, PNG, WebP, GIF, BMP, HEIC, AVIF, JPEG XL, JPEG 2000,
+TIFF, PSD, ICNS, camera RAW (DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2...),
+EXR, HDR, TGA and more, in natural order (`page2` before `page10`).
 
 ## How it reads
 
@@ -89,6 +97,7 @@ direction and fit.
 | G or ⌘G, a number, Return | Go to that page |
 | ⌘] / ⌘[ | Next / previous book in the folder |
 | Z | The magnifier: enlarges what's under the pointer |
+| U | Upscale pages (with an upscaler adapter), or not |
 | 1 / 2 / 3 | Read as a comic / manga / webtoon |
 | D | Two pages side by side, or one |
 | P | Pair the cover (when the pairs are off by one) |
@@ -148,9 +157,23 @@ Leaf follows the same rules as [Folio](https://github.com/solacecasino/folio):
   book names, and every path in it and in the log shows `~` for your home
   folder.
 
+## Upscaling (Upscale 4K)
+
+Install the [Upscale 4K](adapters/upscale-4k/) adapter and pages shown bigger
+than they are (on a 4K or Retina screen, in full screen, a webtoon widened
+to the window, the magnifier) are upscaled on the GPU instead of by Leaf.
+In the spirit of Anime4K, manga and webtoon line art isn't just enlarged:
+its lines are retraced, so edges stay crisp and lines keep their weight.
+Colour comics are upscaled softly. Leaf never waits for it: pages show at
+once and the upscaled ones replace them as they arrive. **View → Upscale
+Pages** (U) turns it off and on. On an Apple M2, a page shown at 4K takes
+31–33 ms (line art) or 23 ms (colour), against 47 ms for Leaf's own,
+plainer scaler.
+
 ## Adapters
 
-Leaf ships with no adapters. An adapter is an optional add-on: a separate
+Leaf ships with no adapters; [the catalog](adapters/README.md) lists the
+ones built with it. An adapter is an optional add-on: a separate
 program, in any language, that can add commands or teach Leaf to open a new
 kind of book. To install one, drop its `.zip` or folder on Leaf's window;
 Leaf shows what it is and what it may do first. Its commands appear in an
@@ -179,11 +202,13 @@ publishes the release.
 
 ## How it's built
 
-About 6,500 lines of Rust: `winit` for the window, the CPU for the pixels
+About 8,500 lines of Rust (and 800 for the upscaler): `winit` for the window, the CPU for the pixels
 (`softbuffer`), no GPU, the system's own menus and dialogs. Formats come
 from the system itself where it can read them, so they cost nothing to
 download: libarchive for RAR, 7-Zip and TAR (macOS and Linux), and on macOS
 Core Graphics for PDF, ImageIO for images, and Core Text and AppKit for text.
+Windows and Linux get pure-Rust readers for the rest (cosmic-text, unrar,
+sevenz, jxl-oxide, rav1d and others) and pdfium for PDFs.
 
 - **The page is ready before the window is.** The last book opens and its
   page is decoded and scaled on a background thread while macOS is still
@@ -204,6 +229,7 @@ Core Graphics for PDF, ImageIO for images, and Core Text and AppKit for text.
 ## Not yet
 
 - MOBI/AZW, DjVu and CBA (ACE) books, except through an adapter.
-- PDFs and text books on Windows and Linux; RAR, 7-Zip and TAR on Windows.
 - A menu bar on Linux (every command has a key).
+- The formatting of Word, RTF and OpenDocument files on Windows and Linux
+  (their words and paragraphs are there).
 - Signed and notarized downloads.
