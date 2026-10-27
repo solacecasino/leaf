@@ -14,6 +14,26 @@ pub enum Style {
     Soft,
 }
 
+/// How hard the lines are worked on, from Leaf's `upscale_strength`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Strength {
+    Gentle,
+    Normal,
+    /// Crisper, with slight stair steps on curves and beads along hairline
+    /// diagonals: retracing past 0.5 starts snapping edges to the pixel grid.
+    Strong,
+}
+
+impl Strength {
+    pub fn parse(s: Option<&str>) -> Strength {
+        match s {
+            Some("gentle") => Strength::Gentle,
+            Some("strong") => Strength::Strong,
+            _ => Strength::Normal,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Params {
@@ -44,7 +64,8 @@ struct Buffers {
     a: wgpu::Buffer,
     b: wgpu::Buffer,
     grad: wgpu::Buffer,
-    read: wgpu::Buffer,
+    /// Where the result is copied to be read, unless the GPU shares memory.
+    read: Option<wgpu::Buffer>,
     group: wgpu::BindGroup,
     /// What they were made for: source bytes, source pixels, output pixels.
     sizes: (u64, u64, u64),
@@ -56,6 +77,9 @@ pub struct Gpu {
     pub name: String,
     /// Drawn by the CPU (WARP, llvmpipe): slower than Leaf's own scaler.
     pub software: bool,
+    pub strength: Strength,
+    /// The result is read from the GPU's working buffer, not a copy of it.
+    pub shared_memory: bool,
     params: wgpu::Buffer,
     layout: wgpu::BindGroupLayout,
     unpack: wgpu::ComputePipeline,
@@ -85,10 +109,16 @@ impl Gpu {
         let info = adapter.get_info();
         let limits = adapter.limits();
         let timestamps = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+        // Where the GPU shares the computer's memory (Apple Silicon, built-in
+        // GPUs), the result is read where the shaders left it: no copy, and
+        // no 42 MB buffer to copy a 4K page into. A card with its own memory
+        // reads slowly from its working buffers, so it copies as before.
+        let shared = (adapter.features() & wgpu::Features::MAPPABLE_PRIMARY_BUFFERS)
+            .intersection(if info.device_type == wgpu::DeviceType::IntegratedGpu { wgpu::Features::all() } else { wgpu::Features::empty() });
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("upscale-4k"),
             required_limits: limits.clone(),
-            required_features: timestamps,
+            required_features: timestamps | shared,
             ..Default::default()
         }))
         .map_err(|e| format!("couldn't use the GPU: {e}"))?;
@@ -159,6 +189,8 @@ impl Gpu {
         Ok(Gpu {
             name: format!("{} ({:?})", info.name, info.backend),
             software: info.device_type == wgpu::DeviceType::Cpu,
+            strength: Strength::Normal,
+            shared_memory: !shared.is_empty(),
             unpack: pipeline("unpack_source"),
             upscale: pipeline("upscale"),
             gradient: pipeline("gradient"),
@@ -189,9 +221,9 @@ impl Gpu {
             let src = make("src", sizes.0.div_ceil(4) * 4, storage | wgpu::BufferUsages::COPY_DST);
             let img = make("img", sizes.1 * 4, storage);
             let a = make("a", sizes.2 * 4, storage);
-            let b = make("b", sizes.2 * 4, storage | wgpu::BufferUsages::COPY_SRC);
+            let b = make("b", sizes.2 * 4, storage | if self.shared_memory { wgpu::BufferUsages::MAP_READ } else { wgpu::BufferUsages::COPY_SRC });
             let grad = make("grad", sizes.2 * 4, storage);
-            let read = make("read", sizes.2 * 4, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+            let read = (!self.shared_memory).then(|| make("read", sizes.2 * 4, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST));
             fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
                 wgpu::BindGroupEntry { binding, resource: buffer.as_entire_binding() }
             }
@@ -215,11 +247,17 @@ impl Gpu {
         }
         let started = Instant::now();
         let (src_px, out_px) = (iw as u64 * ih as u64, ow as u64 * oh as u64);
-        let mut strength = match style {
-            // retrace, thin, sharpen. Retracing harder than this snaps
-            // edges into stair steps on curves (checked by eye at 3×).
-            Style::Lines => [0.5, 0.25, 0.35, 0.0],
-            Style::Soft => [0.0, 0.0, 0.25, 0.0],
+        // Retrace, thin, sharpen. Each step was looked at by eye at 3× on
+        // curves and diagonals: past 0.5, retracing snaps edges into stair
+        // steps, which only "strong" accepts; more thinning and sharpening
+        // without it made no visible difference.
+        let mut strength = match (style, self.strength) {
+            (Style::Lines, Strength::Gentle) => [0.15, 0.06, 0.12, 0.0],
+            (Style::Lines, Strength::Normal) => [0.5, 0.25, 0.35, 0.0],
+            (Style::Lines, Strength::Strong) => [0.6, 0.3, 0.5, 0.0],
+            (Style::Soft, Strength::Gentle) => [0.0, 0.0, 0.12, 0.0],
+            (Style::Soft, Strength::Normal) => [0.0, 0.0, 0.25, 0.0],
+            (Style::Soft, Strength::Strong) => [0.0, 0.0, 0.45, 0.0],
         };
         // For tuning: UPSCALE_STRENGTH="retrace,thin,sharpen".
         if let Ok(v) = std::env::var("UPSCALE_STRENGTH") {
@@ -264,13 +302,16 @@ impl Gpu {
             pass.dispatch_workgroups(ox, oy, 1);
         }
         drop(pass);
-        encoder.copy_buffer_to_buffer(&b.b, 0, &b.read, 0, out_px * 4);
+        if let Some(read) = &b.read {
+            encoder.copy_buffer_to_buffer(&b.b, 0, read, 0, out_px * 4);
+        }
         if let Some((set, resolve, read, _)) = &self.timer {
             encoder.resolve_query_set(set, 0..2, resolve, 0);
             encoder.copy_buffer_to_buffer(resolve, 0, read, 0, 16);
         }
         self.queue.submit([encoder.finish()]);
-        let slice = b.read.slice(..out_px * 4);
+        let result_buffer = b.read.as_ref().unwrap_or(&b.b);
+        let slice = result_buffer.slice(..out_px * 4);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| drop(tx.send(r)));
         self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).map_err(|e| e.to_string())?;
@@ -285,7 +326,7 @@ impl Gpu {
             Some(t[1].saturating_sub(t[0]) as f64 * *period as f64 / 1e6)
         });
         let result = slice.get_mapped_range().map_err(|e| e.to_string()).and_then(|view| out.write_all(&view).map_err(|e| e.to_string()));
-        b.read.unmap();
+        result_buffer.unmap();
         result?;
         let write = started.elapsed().as_secs_f64() * 1000.0 - upload - gpu;
         Ok(Timing { upload, gpu, shaders, write })

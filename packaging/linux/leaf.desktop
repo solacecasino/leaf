@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Leaf
+GenericName=Comic Reader
+Comment=A bare comic and manga reader that opens where you left off
+Exec=leaf %f
+Icon=leaf
+Terminal=false
+Categories=Graphics;Viewer;Office;
+Keywords=comic;manga;webtoon;cbz;cbr;reader;
+MimeType=
+StartupWMClass=leaf

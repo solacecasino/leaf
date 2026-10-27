@@ -42,6 +42,9 @@ case "$(uname -s)" in
     d=leaf-$VERSION-linux-$(arch)
     rm -rf "target/stage" && mkdir -p "target/stage/$d"
     cp target/release/leaf README.md LICENSE "target/stage/$d/"
+    # The app menu entry and icon, added by ./install.sh.
+    cp packaging/linux/install.sh packaging/linux/leaf.desktop "target/stage/$d/"
+    cp assets/icon-256.png "target/stage/$d/leaf.png"
     cp "$PDFIUM_DIR/lib/libpdfium.so" "target/stage/$d/"
     cp "$PDFIUM_DIR/LICENSE" "target/stage/$d/LICENSE-pdfium.txt"
     tar -czf "dist/$d.tar.gz" -C target/stage "$d"

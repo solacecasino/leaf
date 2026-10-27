@@ -22,7 +22,11 @@ Download from [Releases](https://github.com/solacecasino/leaf/releases):
 - **Windows**: unzip it and run **Leaf.exe** (keep `pdfium.dll` beside it:
   it draws PDFs). SmartScreen may ask once, since Leaf isn't signed:
   **More info → Run anyway**.
-- **Linux**: unpack it and run `leaf` (keep `libpdfium.so` beside it). The
+- **Linux**: unpack it and run `leaf` (keep `libpdfium.so` beside it).
+  `./install.sh` in the same folder adds Leaf to your app menu with its
+  icon, offers it under **Open With** for books and images, and opens comic
+  archives in Leaf unless another app already does (`./install.sh
+  --remove` takes it out again; nothing outside your home folder changes). The
   window needs libxkbcommon (and libxkbcommon-x11 on X11), which every
   desktop has. RAR, 7-Zip and TAR use the system's libarchive when it's
   there, and Leaf's own readers when it isn't; HEIC pictures need libheif.
@@ -128,7 +132,7 @@ Windows, `~/.config/leaf` on Linux. Copy it to move your setup.
 |---|---|
 | `state.json` | Where you are in each book, and recent books. Readable and safe to edit. |
 | `keys.toml` | Rebind any key, including adapter commands. Written on first run with every command in comments. **Leaf → Edit Key Bindings** opens it. Saved changes apply straight away. |
-| `settings.toml` | Colours, the gap between two pages, the webtoon width, the text books' font and paper, whether to go on to the next book, the magnifier's zoom, and how new books are read. Written on first run with every setting commented out; **Leaf → Edit Settings** opens it. Saved changes apply straight away. |
+| `settings.toml` | Colours, the gap between two pages, the webtoon width, the text books' font and paper, whether to go on to the next book, the magnifier's zoom, how new books are read, and how hard an upscaler works (`upscale_style`, `upscale_strength`). Written on first run with every setting commented out; **Leaf → Edit Settings** opens it. Saved changes apply straight away. |
 | `adapters/` | Installed adapters, one folder each. |
 | `approvals.json` | Which adapters you've allowed to run. |
 | `leaf.log` | What happened this run, including adapters' output. **Help → Show Log**. |
@@ -166,9 +170,11 @@ In the spirit of Anime4K, manga and webtoon line art isn't just enlarged:
 its lines are retraced, so edges stay crisp and lines keep their weight.
 Colour comics are upscaled softly. Leaf never waits for it: pages show at
 once and the upscaled ones replace them as they arrive. **View → Upscale
-Pages** (U) turns it off and on. On an Apple M2, a page shown at 4K takes
-31–33 ms (line art) or 23 ms (colour), against 47 ms for Leaf's own,
-plainer scaler.
+Pages** (U) turns it off and on, and `upscale_strength` in settings.toml
+makes it `gentle`, `normal` or `strong`. On an Apple M2, a page shown at 4K
+takes 32 ms (line art) or 22.5 ms (colour), against 48 ms for Leaf's own,
+plainer scaler; the adapter uses 148 MB while it works. It needs a real
+GPU: on a software one it turns itself down and Leaf scales as before.
 
 ## Adapters
 

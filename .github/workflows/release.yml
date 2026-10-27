@@ -108,6 +108,8 @@ jobs:
           # A real GPU is offered to Leaf.
           printf '{"id":1,"method":"upscale.ready"}\n' | ./upscale-4k/upscale-4k | tee ready.json
           grep -q '"device"' ready.json
+      - name: Install the adapter's zip as a drop on Leaf does, and run it
+        run: LEAF_ADAPTER_ZIP=$(echo $PWD/dist/upscale-4k-*-macos-universal.zip) cargo test installs_and_runs_a_released_zip -- --nocapture
       - uses: actions/upload-artifact@v4
         with:
           name: leaf-macos
@@ -204,10 +206,13 @@ jobs:
         run: |
           rm -rf a && mkdir a && cd a && unzip -q ../dist/upscale-4k-*-windows-*.zip
           ./upscale-4k/upscale-4k.exe --selftest
-          ./upscale-4k/upscale-4k.exe --bench
+          # No --bench: a software GPU's times say nothing about a real one.
           # The software GPU is turned down, so Leaf scales by itself.
           printf '{"id":1,"method":"upscale.ready"}\n' | ./upscale-4k/upscale-4k.exe | tee ready.json
           grep -q 'drawn by the CPU' ready.json
+      - name: Install the adapter's zip as a drop on Leaf does, and run it
+        shell: bash
+        run: LEAF_ADAPTER_ZIP=$(echo $PWD/dist/upscale-4k-*-windows-*.zip) cargo test installs_and_runs_a_released_zip -- --nocapture
       - name: Screenshots
         if: matrix.arch == 'x64'
         shell: pwsh
@@ -291,14 +296,38 @@ jobs:
           leaf=$(echo x/leaf-*/leaf)
           "$leaf" --version
           for f in test-books/*; do "$leaf" --check "$f"; done
+      - name: Add Leaf to the app menu, as install.sh does for people
+        run: |
+          set -e
+          sudo apt-get install -y desktop-file-utils xdg-utils
+          export HOME=$PWD/home XDG_DATA_HOME=$PWD/home/.local/share
+          mkdir -p "$HOME"
+          # A comic type that already has an app keeps it.
+          mkdir -p "$XDG_DATA_HOME/applications"
+          printf '[Desktop Entry]\nType=Application\nName=Other\nExec=true %%f\n' > "$XDG_DATA_HOME/applications/other.desktop"
+          xdg-mime default other.desktop application/x-cbt
+          x/leaf-*/install.sh
+          desktop-file-validate "$XDG_DATA_HOME/applications/leaf.desktop"
+          cat "$XDG_DATA_HOME/applications/leaf.desktop"
+          test -f "$XDG_DATA_HOME/icons/hicolor/256x256/apps/leaf.png"
+          test "$(xdg-mime query default application/vnd.comicbook+zip)" = leaf.desktop
+          test "$(xdg-mime query default application/vnd.comicbook-rar)" = leaf.desktop
+          test "$(xdg-mime query default application/x-cbt)" = other.desktop
+          # The Exec line really starts this Leaf.
+          exe=$(sed -n 's/^Exec="\(.*\)" %f$/\1/p' "$XDG_DATA_HOME/applications/leaf.desktop")
+          "$exe" --version
+          x/leaf-*/install.sh --remove
+          test ! -e "$XDG_DATA_HOME/applications/leaf.desktop"
       - name: Self-test the upscaler on this GPU (lavapipe, the software one, on a runner)
         run: |
           rm -rf a && mkdir a && cd a && unzip -q ../dist/upscale-4k-*-linux-*.zip
           ./upscale-4k/upscale-4k --selftest
-          ./upscale-4k/upscale-4k --bench
+          # No --bench: a software GPU's times say nothing about a real one.
           # The software GPU is turned down, so Leaf scales by itself.
           printf '{"id":1,"method":"upscale.ready"}\n' | ./upscale-4k/upscale-4k | tee ready.json
           grep -q 'drawn by the CPU' ready.json
+      - name: Install the adapter's zip as a drop on Leaf does, and run it
+        run: LEAF_ADAPTER_ZIP=$(echo $PWD/dist/upscale-4k-*-linux-*.zip) cargo test installs_and_runs_a_released_zip -- --nocapture
       - name: Screenshots
         if: matrix.arch == 'x64'
         timeout-minutes: 3

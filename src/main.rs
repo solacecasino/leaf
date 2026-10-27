@@ -554,12 +554,14 @@ impl App {
     /// The upscaler and style for the open book: line art for manga and
     /// webtoons, soft for comics, unless settings.toml says otherwise.
     fn tell_loader_upscaler(&self) {
-        let style = match (settings::get().upscale_style.as_str(), self.open.as_ref().map(Open::mode)) {
+        let settings = settings::get();
+        let style = match (settings.upscale_style.as_str(), self.open.as_ref().map(Open::mode)) {
             ("lines", _) => upscale::Style::Lines,
             ("soft", _) | (_, Some(Mode::Comic)) => upscale::Style::Soft,
             _ => upscale::Style::Lines,
         };
-        self.loader.set_upscaler(self.upscaler.clone().map(|u| (u, style)));
+        let strength = upscale::Strength::from_setting(&settings.upscale_strength);
+        self.loader.set_upscaler(self.upscaler.clone().map(|u| (u, style, strength)));
     }
 
     /// Pages are made again (the old ones showing until then), after the
@@ -1571,7 +1573,22 @@ impl ApplicationHandler<Event> for App {
             return;
         }
         let attrs = Window::default_attributes().with_title("Leaf").with_inner_size(LogicalSize::<f64>::from(self.window_size()));
+        // On Linux the desktop matches the window to leaf.desktop (its menu
+        // entry and icon) by this name.
+        #[cfg(target_os = "linux")]
+        let attrs = {
+            use winit::platform::{wayland::WindowAttributesExtWayland, x11::WindowAttributesExtX11};
+            let attrs = WindowAttributesExtWayland::with_name(attrs, "leaf", "leaf");
+            WindowAttributesExtX11::with_name(attrs, "leaf", "leaf")
+        };
         let window = Arc::new(event_loop.create_window(attrs).expect("create the window"));
+        // X11 shows the window's own icon in the taskbar and the window
+        // switcher (Wayland takes it from leaf.desktop).
+        #[cfg(target_os = "linux")]
+        if let Ok(icon) = image::load_from_memory(include_bytes!("../assets/icon-256.png")).map(|i| i.into_rgba8()) {
+            let (w, h) = icon.dimensions();
+            window.set_window_icon(winit::window::Icon::from_rgba(icon.into_raw(), w, h).ok());
+        }
         let context = Context::new(window.clone()).expect("connect to the display");
         self.surface = Some(Surface::new(&context, window.clone()).expect("create the drawing surface"));
         self.window = Some(window);

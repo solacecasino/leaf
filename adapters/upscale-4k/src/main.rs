@@ -9,7 +9,7 @@
 
 mod gpu;
 
-use gpu::{Gpu, Style};
+use gpu::{Gpu, Strength, Style};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 use std::time::Instant;
@@ -92,6 +92,7 @@ fn page(gpu: &mut Gpu, p: &Value) -> Result<Value, String> {
     let rect: Vec<f32> = p["rect"].as_array().map(|r| r.iter().filter_map(Value::as_f64).map(|v| v as f32).collect()).unwrap_or_default();
     let rect: [f32; 4] = if rect.len() == 4 { [rect[0], rect[1], rect[2], rect[3]] } else { [0.0, 0.0, iw as f32, ih as f32] };
     let style = if p["style"].as_str() == Some("soft") { Style::Soft } else { Style::Lines };
+    gpu.strength = Strength::parse(p["strength"].as_str());
     let input = p["input"].as_str().ok_or("page.upscale needs an `input`")?;
     let output = p["output"].as_str().ok_or("page.upscale needs an `output`")?;
     let started = Instant::now();
@@ -186,7 +187,7 @@ fn selftest() -> i32 {
             return 1;
         }
     };
-    println!("GPU: {}", gpu.name);
+    println!("GPU: {}{}", gpu.name, if gpu.shared_memory { ", sharing memory with the CPU" } else { "" });
     if gpu.software {
         println!("     drawn by the CPU: Leaf scales by itself here instead (tested anyway)");
     }
@@ -241,6 +242,24 @@ fn selftest() -> i32 {
         let mut again = Vec::new();
         let _ = gpu.run(&page, iw, ih, ow, oh, [0.0, 0.0, iw as f32, ih as f32], style, &mut again);
         check(again == out, &format!("{style:?}: the same every time"));
+
+        // Gentle to strong: each crisper than the last (or as crisp, for
+        // soft), all crisper than bilinear, and none thickening or
+        // thinning the lines.
+        let mut soft = Vec::new();
+        for strength in [Strength::Gentle, Strength::Normal, Strength::Strong] {
+            gpu.strength = strength;
+            let mut out = Vec::new();
+            let _ = gpu.run(&page, iw, ih, ow, oh, [0.0, 0.0, iw as f32, ih as f32], style, &mut out);
+            let g = greys(&out);
+            let n: usize = (40..2000usize).step_by(37).map(|y| soft_pixels(&g[y * ow as usize..(y + 1) * ow as usize])).sum();
+            let ratio = ink(&g) / ink(&reference);
+            println!("     {strength:?}: soft edge pixels {n}, ink {ratio:.2}");
+            check(n < theirs && (0.85..1.15).contains(&ratio), &format!("{style:?}, {strength:?}: crisper than bilinear, same weight"));
+            soft.push(n);
+        }
+        gpu.strength = Strength::Normal;
+        check(soft.windows(2).all(|w| w[1] <= w[0]), &format!("{style:?}: stronger is never softer"));
     }
     // A band (part of the output), as Leaf asks for a webtoon's.
     let mut band = Vec::new();

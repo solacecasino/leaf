@@ -32,6 +32,33 @@ pub enum Style {
     Soft,
 }
 
+/// How hard the upscaler works the lines: `upscale_strength` in
+/// settings.toml. Adapters that don't know it upscale as they always have.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Strength {
+    Gentle,
+    Normal,
+    Strong,
+}
+
+impl Strength {
+    pub fn from_setting(s: &str) -> Strength {
+        match s {
+            "gentle" => Strength::Gentle,
+            "strong" => Strength::Strong,
+            _ => Strength::Normal,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Strength::Gentle => "gentle",
+            Strength::Normal => "normal",
+            Strength::Strong => "strong",
+        }
+    }
+}
+
 pub struct Upscaler {
     pub name: String,
     link: Arc<Link>,
@@ -67,7 +94,7 @@ impl Upscaler {
 
     /// `img` upscaled to `w`×`h` (rows `rows` of it, for a webtoon band).
     /// Called from the page loader, one at a time.
-    pub fn run(&self, img: &RgbImage, w: u32, h: u32, rows: Option<(u32, u32)>, style: Style) -> Result<Scaled, String> {
+    pub fn run(&self, img: &RgbImage, w: u32, h: u32, rows: Option<(u32, u32)>, style: Style, strength: Strength) -> Result<Scaled, String> {
         let (iw, ih) = img.dimensions();
         let (r0, r1) = rows.map_or((0, h), |(a, b)| (a.min(h), b.min(h)));
         if r1 <= r0 {
@@ -86,7 +113,7 @@ impl Upscaler {
         let params = json!({
             "input": input, "width": iw, "height": s1 - s0, "format": "rgb8",
             "output": output, "out_width": w, "out_height": r1 - r0, "out_format": "0rgb32",
-            "rect": rect, "style": if style == Style::Lines { "lines" } else { "soft" },
+            "rect": rect, "style": if style == Style::Lines { "lines" } else { "soft" }, "strength": strength.name(),
         });
         let sent = started.elapsed();
         let result = self.link.request("page.upscale", params, TIMEOUT).and_then(|answer| {
@@ -187,7 +214,7 @@ while read -r line; do
   [ -z "$id" ] && continue
   case "$line" in
     *upscale.ready*) printf '{"id":%s,"result":{"device":"Fake GPU"}}\n' "$id" ;;
-    *page.upscale*)
+    *'"strength":"'*page.upscale*|*page.upscale*'"strength":"'*)
       out=$(printf '%s' "$line" | sed -n 's/.*"output":"\([^"]*\)".*/\1/p')
       w=$(printf '%s' "$line" | sed -n 's/.*"out_width":\([0-9]*\).*/\1/p')
       h=$(printf '%s' "$line" | sed -n 's/.*"out_height":\([0-9]*\).*/\1/p')
@@ -206,11 +233,11 @@ done
         assert_eq!(rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap(), "Fake GPU");
         assert!(up.usable());
         let page = manga_page(300, 400);
-        let whole = up.run(&page, 600, 800, None, Style::Lines).unwrap();
+        let whole = up.run(&page, 600, 800, None, Style::Lines, Strength::Normal).unwrap();
         assert_eq!((whole.w, whole.h, whole.px.len()), (600, 800, 480_000));
         // The byte Leaf leaves empty is cleared whatever the adapter sent.
         assert!(whole.px.iter().all(|&p| p == 0x0080_8080));
-        let band = up.run(&page, 600, 800, Some(band_rows(1)), Style::Soft).unwrap();
+        let band = up.run(&page, 600, 800, Some(band_rows(1)), Style::Soft, Strength::Strong).unwrap();
         assert_eq!((band.w, band.h), (600, 288), "the last band is what's left");
 
         // An adapter that answers wrongly is used no more.
@@ -221,7 +248,7 @@ done
         let (tx, rx) = std::sync::mpsc::channel();
         bad.warm_up(move |r| drop(tx.send(r)));
         rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
-        assert!(bad.run(&page, 600, 800, None, Style::Lines).is_err());
+        assert!(bad.run(&page, 600, 800, None, Style::Lines, Strength::Normal).is_err());
         assert!(!bad.usable(), "after a failure Leaf scales by itself");
     }
 
@@ -254,10 +281,37 @@ done
         up.warm_up(move |r| drop(tx.send(r)));
         let device = rx.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
         for style in [Style::Lines, Style::Soft] {
-            let gpu = median((0..15).map(|_| timed(&mut || up.run(&page, w, h, None, style).unwrap())).collect());
+            let gpu = median((0..15).map(|_| timed(&mut || up.run(&page, w, h, None, style, Strength::Normal).unwrap())).collect());
             eprintln!("{w}x{h}: Leaf's CPU scaler {cpu:.1} ms; {device}, {style:?}, end to end {gpu:.1} ms");
         }
-        let band_times = (0..8).map(|i| timed(&mut || up.run(&page, w, h, Some(band_rows(i)), Style::Lines).unwrap())).collect();
+        let band_times = (0..8).map(|i| timed(&mut || up.run(&page, w, h, Some(band_rows(i)), Style::Lines, Strength::Normal).unwrap())).collect();
         eprintln!("a 512-row band of it: {:.1} ms", median(band_times));
+    }
+
+    /// Leaf's own memory holding five 4K pages (it keeps three ready for a
+    /// comic, six for two-page manga), made by its scaler and then through
+    /// the upscaler. Runs when `LEAF_UPSCALER` names the upscaler's program
+    /// (`cargo test --release four_k_memory -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn four_k_memory() {
+        let Some(program) = std::env::var_os("LEAF_UPSCALER") else { return };
+        let mb = || crate::platform::memory_use().map_or(0.0, |(now, _)| now as f64 / 1e6);
+        let page = manga_page(1200, 1700);
+        let target = Target { w: 2711, h: 3840, fit: Fit::Page };
+        let (w, h) = scaled_size(1200, 1700, target);
+        let start = mb();
+        let held: Vec<Scaled> = (0..5).map(|_| crate::loader::scale_for_test(&page, target)).collect();
+        let cpu = mb();
+        drop(held);
+        let up = Upscaler::new(crate::adapters::test_link(std::path::Path::new(&program)));
+        let (tx, rx) = std::sync::mpsc::channel();
+        up.warm_up(move |r| drop(tx.send(r)));
+        rx.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+        let before = mb();
+        let held: Vec<Scaled> = (0..5).map(|_| up.run(&page, w, h, None, Style::Lines, Strength::Normal).unwrap()).collect();
+        let gpu = mb();
+        eprintln!("five {w}x{h} pages held: Leaf's scaler +{:.0} MB; through the upscaler +{:.0} MB", cpu - start, gpu - before);
+        drop(held);
     }
 }

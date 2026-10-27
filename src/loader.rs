@@ -4,7 +4,7 @@
 //! nothing to do, it lays out more of a text book.
 
 use crate::book::{Book, Page};
-use crate::upscale::{Style, Upscaler};
+use crate::upscale::{Strength, Style, Upscaler};
 use crate::state::Fit;
 use image::RgbImage;
 use std::collections::VecDeque;
@@ -88,7 +88,7 @@ struct Job {
     busy: Option<(u64, Piece, Target)>,
     /// An upscaler adapter to make enlarged pictures with, and how; and a
     /// count of changes to it, so pictures made before a change aren't reused.
-    upscaler: Option<(Arc<Upscaler>, Style)>,
+    upscaler: Option<(Arc<Upscaler>, Style, Strength)>,
     upscaler_changes: u64,
 }
 
@@ -123,10 +123,10 @@ impl Loader {
 
     /// Makes enlarged pictures with `upscaler` from now on (or Leaf's own
     /// scaler, with None).
-    pub fn set_upscaler(&self, upscaler: Option<(Arc<Upscaler>, Style)>) {
+    pub fn set_upscaler(&self, upscaler: Option<(Arc<Upscaler>, Style, Strength)>) {
         let mut job = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
         let same = match (&job.upscaler, &upscaler) {
-            (Some((a, s)), Some((b, t))) => Arc::ptr_eq(a, b) && s == t && a.usable() == b.usable(),
+            (Some((a, s, x)), Some((b, t, y))) => Arc::ptr_eq(a, b) && s == t && x == y && a.usable() == b.usable(),
             (None, None) => true,
             _ => false,
         };
@@ -156,7 +156,7 @@ struct Decoded {
 }
 
 enum Work {
-    Piece(u64, Arc<Book>, Piece, Target, Option<(Arc<Upscaler>, Style)>, u64),
+    Piece(u64, Arc<Book>, Piece, Target, Option<(Arc<Upscaler>, Style, Strength)>, u64),
     Grow(u64, Arc<Book>),
 }
 
@@ -221,7 +221,7 @@ fn work(shared: Shared, deliver: impl Fn(Loaded) -> bool) {
                 // when there is one; anything it can't do, Leaf does.
                 let (w, h) = scaled_size(img.width(), img.height(), target);
                 let upscaled = match &upscaler {
-                    Some((u, style)) if !drawn && w > img.width() && u.usable() => u.run(&img, w, h, rows, *style).ok(),
+                    Some((u, style, strength)) if !drawn && w > img.width() && u.usable() => u.run(&img, w, h, rows, *style, *strength).ok(),
                     _ => None,
                 };
                 (Arc::new(upscaled.unwrap_or_else(|| scale(&img, target, rows))), info)

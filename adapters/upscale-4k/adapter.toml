@@ -1,5 +1,5 @@
 name = "Upscale 4K"
-version = "0.1.0"
+version = "0.2.0"
 author = "Leaf"
 license = "MIT"
 description = "Upscales pages shown bigger than they are, on the GPU. Manga and webtoon line art is retraced and kept thin, in the spirit of Anime4K; colour comics are upscaled softly, like FSR. View → Upscale Pages (U) turns it on and off."

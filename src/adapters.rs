@@ -855,6 +855,37 @@ done
         assert!(!is_package(&root));
     }
 
+    /// A released adapter zip, installed the way a drop on Leaf's window
+    /// installs it, then started as Leaf starts it and asked if it's ready.
+    /// CI runs it on each system with that system's own zip
+    /// (`LEAF_ADAPTER_ZIP`); without one there's nothing to test.
+    #[test]
+    fn installs_and_runs_a_released_zip() {
+        let Some(zip) = std::env::var_os("LEAF_ADAPTER_ZIP").map(PathBuf::from) else { return };
+        assert!(is_package(&zip), "{} isn't seen as an adapter", zip.display());
+        let dest = temp("released").join("adapters");
+        let m = install_into(&zip, &dest).unwrap();
+        let found = discover_in(&dest);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].manifest.name, m.name);
+        let host = Host { all: found, send: Arc::new(|_| {}), generation: 0 };
+        let i = host.upscaler().expect("an upscaler with book.pages");
+
+        let mut child = spawn(&host.all[i].dir, &host.all[i].manifest.run).unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(stdin, r#"{{"id":1,"method":"upscale.ready"}}"#).unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        drop(stdin);
+        let _ = child.wait();
+        let answer: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}"));
+        // A real GPU names itself; a software one is turned down, by name.
+        let device = answer["result"]["device"].as_str();
+        let refused = answer["error"].as_str().is_some_and(|e| e.contains("drawn by the CPU"));
+        assert!(device.is_some() || refused, "{answer}");
+        eprintln!("{} {} installed and answered: {answer}", m.name, m.version);
+    }
+
     #[test]
     fn refuses_programs_for_other_computers() {
         let dir = temp("platform");

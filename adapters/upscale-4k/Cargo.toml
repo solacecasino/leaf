@@ -1,6 +1,6 @@
 [package]
 name = "upscale-4k"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A Leaf adapter that upscales comic and manga pages on the GPU, in the spirit of Anime4K."
 license = "MIT"

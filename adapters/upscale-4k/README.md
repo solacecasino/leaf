@@ -24,6 +24,19 @@ Manga and webtoons get all four (**lines**); colour comics get 1 and 4
 (**soft**). Leaf picks by the book's reading mode; `upscale_style` in
 Leaf's settings.toml can fix it to one.
 
+`upscale_strength` in settings.toml sets how hard it works (Leaf 0.0.5 and
+later):
+
+| | Line art | Colour |
+|---|---|---|
+| `gentle` | Light retracing: closest to the original scan | A light sharpen |
+| `normal` (the default) | Crisp lines, no stair steps | As before |
+| `strong` | Crisper still (35% fewer soft edge pixels), with slight stair steps on curves and beads along hairline diagonals | A stronger sharpen |
+
+Retracing harder than `strong` snaps edges into stair steps; sharpening
+and thinning harder without it looked no different, so the levels stop
+there.
+
 ## Install
 
 Download the zip for your computer from
@@ -44,20 +57,29 @@ upscale them. It never goes online.
 
 `upscale-4k --bench` times it on your GPU; `upscale-4k --selftest` checks
 it (crisp edges, lines that keep their weight, untouched paper, smooth
-gradients). On an Apple M2, a 1200×1700 page upscaled to 2711×3840
-(a page on a 4K screen), through Leaf:
+gradients, every strength). On an Apple M2, a 1200×1700 page upscaled to
+2711×3840 (a page on a 4K screen), through Leaf, median of 4 runs:
 
 | | Each page |
 |---|---|
-| Leaf's own scaler (CPU, no retracing) | 47 ms |
-| Line art (lines) | 31–33 ms |
-| Colour (soft) | 23 ms |
-| A webtoon band (512 rows) | 5 ms |
+| Leaf's own scaler (CPU, no retracing) | 48 ms |
+| Line art (lines) | 32 ms |
+| Colour (soft) | 22.5 ms |
+| A webtoon band (512 rows) | 5–6 ms |
 
-The shaders themselves take 13.5 ms (lines) and 5.1 ms (soft) a page when
+The shaders themselves take 14–16 ms (lines) and 5.2 ms (soft) a page when
 the GPU is busy; the rest is the GPU waking up and handing the picture back.
 Leaf never waits for it: pages show at once, scaled by Leaf, and the
 upscaled ones replace them as they arrive.
+
+**Memory.** Upscaling 4K pages, the adapter uses 148 MB (on Apple
+Silicon, where the GPU's memory is the computer's): page-sized working
+buffers, kept between pages so each page doesn't make them again. Leaf
+itself uses no more than it would without the adapter (about 42 MB for
+each 4K page it keeps ready, either way). On a graphics card with memory
+of its own, the buffers are on the card, plus one more to copy each page
+back. Two files of the page's size sit in
+Leaf's temporary folder while it runs.
 
 **It needs a real GPU.** Where the only one is drawn by the CPU (a virtual
 machine, Remote Desktop, Windows without its graphics driver), it's far

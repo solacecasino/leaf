@@ -147,6 +147,7 @@ memory.
 | `output`, `out_width`, `out_height`, `out_format` | Where to write the result: `out_width`×`out_height` pixels, `"0rgb32"` (4 bytes a pixel, little-endian `0x00RRGGBB`). The file is already that size; write into it |
 | `rect` | `[x0, y0, x1, y1]`: the part of the source, in its pixels, the output covers. A webtoon is asked for in bands, each with a few rows of source around it |
 | `style` | `"lines"` (manga and webtoon line art) or `"soft"` (colour comics), by the book's mode or `upscale_style` in settings.toml |
+| `strength` | `"gentle"`, `"normal"` or `"strong"`, from `upscale_strength` in settings.toml (Leaf 0.0.5 and later; treat it as `"normal"` when it's missing). An adapter with one way of upscaling can ignore it |
 
 Reply `{ "written": <bytes> }` once the output is written, or an error.
 Leaf checks `written`, waits up to 10 seconds, and on any problem scales the

@@ -21,6 +21,8 @@ const EXAMPLE: &str = r##"# Leaf settings. Every line is commented out, so Leaf 
 # magnifier_zoom = 2.0       # how much the magnifier (Z) enlarges
 # upscale_style = "auto"     # with an upscaler adapter: "auto" (line art for manga and
 #                            # webtoons, soft for comics), "lines" or "soft"
+# upscale_strength = "normal" # how hard it works the lines: "gentle", "normal" or
+#                            # "strong" (crisper, with slight stair steps on curves)
 
 # [text]                     # books of writing: .txt, .rtf, Word, text EPUBs
 # font = "Iowan Old Style"
@@ -42,6 +44,7 @@ pub struct Settings {
     pub continue_to_next: bool,
     pub magnifier_zoom: f64,
     pub upscale_style: String,
+    pub upscale_strength: String,
     pub text: TextSettings,
 }
 
@@ -67,6 +70,7 @@ impl Default for Settings {
             continue_to_next: true,
             magnifier_zoom: 2.0,
             upscale_style: "auto".into(),
+            upscale_strength: "normal".into(),
             text: TextSettings::default(),
         }
     }
@@ -102,7 +106,7 @@ impl<'de> Deserialize<'de> for Color {
 
 const KNOWN: &[&str] = &[
     "background", "accent", "progress", "page_gap", "webtoon_width", "default_mode", "color_threshold",
-    "continue_to_next", "magnifier_zoom", "upscale_style", "text",
+    "continue_to_next", "magnifier_zoom", "upscale_style", "upscale_strength", "text",
 ];
 const KNOWN_TEXT: &[&str] = &["font", "size", "paper", "ink"];
 
@@ -166,6 +170,11 @@ fn parse(text: &str) -> (Settings, Option<String>) {
         &mut || s.upscale_style = d.upscale_style.clone(),
     );
     check(
+        ["gentle", "normal", "strong"].contains(&s.upscale_strength.as_str()),
+        "upscale_strength (use gentle, normal or strong)",
+        &mut || s.upscale_strength = d.upscale_strength.clone(),
+    );
+    check(
         ["auto", "comic", "manga", "webtoon"].contains(&s.default_mode.as_str()),
         "default_mode (use auto, comic, manga or webtoon)",
         &mut || s.default_mode = d.default_mode.clone(),
@@ -195,6 +204,13 @@ mod tests {
         assert_eq!(s.webtoon_width, 800.0);
         assert!(problem.unwrap().contains("webtoon_width"));
         assert!(parse("backgrond = 1").1.unwrap().contains("unknown setting \"backgrond\""));
+
+        let (s, problem) = parse("upscale_strength = \"strong\"");
+        assert!(problem.is_none());
+        assert_eq!(s.upscale_strength, "strong");
+        let (s, problem) = parse("upscale_strength = \"max\"");
+        assert_eq!(s.upscale_strength, "normal");
+        assert!(problem.unwrap().contains("use gentle, normal or strong"));
 
         let (s, problem) = parse("accent = \"green\"");
         assert_eq!(s.accent, Settings::default().accent);
