@@ -37,7 +37,7 @@ if ($Action -eq "--remove" -or $Action -eq "/remove") {
     foreach ($k in $ours) { Remove-Item -LiteralPath "$classes\$k" -Recurse -Force -ErrorAction SilentlyContinue }
     foreach ($ext in $comics + $others) {
         Remove-ItemProperty -LiteralPath "$classes\$ext\OpenWithProgids" -Name "Leaf.Comic", "Leaf.Book" -ErrorAction SilentlyContinue
-        if ((Default "$classes\$ext") -eq "Leaf.Comic") { Set-Item -LiteralPath "$classes\$ext" -Value "" }
+        if ((Default "$classes\$ext") -eq "Leaf.Comic") { Remove-ItemProperty -LiteralPath "$classes\$ext" -Name "(default)" }
     }
     Refresh
     Write-Output "Leaf is out of the Open with lists. (This folder is untouched; delete it to remove Leaf.)"

@@ -234,6 +234,7 @@ jobs:
           if (-not $leaf) { throw "Leaf didn't start from the Open command" }
           $leaf | Stop-Process
           cmd /c "x\install.cmd --remove < NUL"
+          if ($LASTEXITCODE -ne 0) { throw "install.cmd --remove failed: $LASTEXITCODE" }
           foreach ($k in "Leaf.Comic", "Leaf.Book", "Applications\Leaf.exe", "Directory\shell\Leaf") { if (Test-Path "$c\$k") { throw "$k is still there after --remove" } }
           if ((Default "$c\.cbz") -ne "") { throw ".cbz still opens in Leaf after --remove" }
           if ((Default "$c\.cbr") -ne "Other.Comic") { throw "--remove changed .cbr" }
