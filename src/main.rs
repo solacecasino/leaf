@@ -270,6 +270,10 @@ struct App {
     wheel: f64,
     swipe: f64,
     wheel_turned: Option<Instant>,
+    /// Leaf just opened or came to the front: scrolling that was already
+    /// going was meant for the window that was there before, and mustn't
+    /// turn pages. Holds when that scrolling was last seen.
+    wheel_settling: Option<Instant>,
     pinch: f64,
     started: Instant,
 }
@@ -312,6 +316,7 @@ impl App {
             wheel: 0.0,
             swipe: 0.0,
             wheel_turned: None,
+            wheel_settling: Some(Instant::now()),
             pinch: 0.0,
             started: Instant::now(),
         };
@@ -1717,6 +1722,9 @@ impl ApplicationHandler<Event> for App {
                 if phase == TouchPhase::Started {
                     self.swipe = 0.0;
                 }
+                if settling(&mut self.wheel_settling, phase, Instant::now()) {
+                    return;
+                }
                 let scrolls = self.open.as_ref().is_some_and(|o| o.mode() == Mode::Webtoon || (o.at.fit == Fit::Width && !o.spreads()));
                 // Scrolling a page works without focus, as on any Mac
                 // window; turning pages needs Leaf to be the active window.
@@ -1755,6 +1763,7 @@ impl ApplicationHandler<Event> for App {
                 self.wheel = 0.0;
                 self.swipe = 0.0;
                 if focused {
+                    self.wheel_settling = Some(Instant::now());
                     // Edited keys.toml or settings.toml and came back: use them.
                     self.reload_config();
                 } else {
@@ -1767,9 +1776,45 @@ impl ApplicationHandler<Event> for App {
     }
 }
 
+/// Whether a scroll event belongs to scrolling that was already going when
+/// Leaf opened or came to the front (see `wheel_settling`). Such scrolling
+/// is ignored until it pauses; fingers put down afresh count at once.
+fn settling(since: &mut Option<Instant>, phase: TouchPhase, now: Instant) -> bool {
+    const PAUSE: Duration = Duration::from_millis(250);
+    let Some(last) = *since else { return false };
+    if phase == TouchPhase::Started || now.saturating_duration_since(last) >= PAUSE {
+        *since = None;
+        return false;
+    }
+    *since = Some(now);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrolling_from_before_must_pause() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        // A stream every 16 ms that began before Leaf opened stays ignored...
+        let mut since = Some(t0);
+        for n in (16..2000).step_by(16) {
+            assert!(settling(&mut since, TouchPhase::Moved, ms(n)));
+        }
+        // ...until it pauses, and then scrolling works.
+        assert!(!settling(&mut since, TouchPhase::Moved, ms(2300)));
+        assert!(!settling(&mut since, TouchPhase::Moved, ms(2310)));
+        // Fingers put down on the trackpad start afresh at once.
+        let mut since = Some(t0);
+        assert!(settling(&mut since, TouchPhase::Moved, ms(100)));
+        assert!(!settling(&mut since, TouchPhase::Started, ms(116)));
+        assert!(!settling(&mut since, TouchPhase::Moved, ms(132)));
+        // A first scroll a moment after opening isn't held back.
+        let mut since = Some(t0);
+        assert!(!settling(&mut since, TouchPhase::Moved, ms(400)));
+    }
 
     fn book_of(n: usize) -> Open {
         let dir = std::env::temp_dir().join(format!("leaf-layout-{n}-{}", std::process::id()));
