@@ -6,7 +6,9 @@
 #
 #   install.cmd            add Leaf (again, after moving this folder)
 #   install.cmd --remove   take it out again
-param([string]$Action = "")
+# install.cmd hands over its argument in LEAF_INSTALL: powershell -File
+# would take "--remove" for a parameter name.
+$Action = [string]$env:LEAF_INSTALL
 $ErrorActionPreference = "Stop"
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path

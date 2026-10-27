@@ -4,7 +4,8 @@ rem   install.cmd            add Leaf (again, after moving this folder)
 rem   install.cmd --remove   take it out again
 rem Windows doesn't run downloaded PowerShell scripts by default; this one
 rem runs because you started it.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" %*
+set "LEAF_INSTALL=%~1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1"
 set code=%errorlevel%
 rem Opened with a double-click: keep the window up to read.
 echo %cmdcmdline% | find /i "%~0" >nul && pause
