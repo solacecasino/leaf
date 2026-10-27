@@ -360,7 +360,9 @@ impl<'a> Compound<'a> {
         while s < END - 1 && (out.len() as u64) < size && steps <= self.fat.len() {
             let at = self.offset(s)?;
             out.extend_from_slice(&self.bytes[at..at + self.sector]);
-            s = *self.fat.get(s as usize)?;
+            // A sector past the end of the FAT ends its chain: macOS writes
+            // big files whose FAT stops short of their last few sectors.
+            s = self.fat.get(s as usize).copied().unwrap_or(END);
             steps += 1;
         }
         if size != u64::MAX {
@@ -379,7 +381,7 @@ impl<'a> Compound<'a> {
         while s < END - 1 && (out.len() as u64) < size && steps <= self.mini_fat.len() {
             let at = s as usize * 64;
             out.extend_from_slice(self.mini_stream.get(at..at + 64)?);
-            s = *self.mini_fat.get(s as usize)?;
+            s = self.mini_fat.get(s as usize).copied().unwrap_or(END);
             steps += 1;
         }
         out.truncate(size as usize);
@@ -423,5 +425,14 @@ mod tests {
             assert!(text.contains("First paragraph of the book."), "{ext}: {text:?}");
             assert!(text.contains("Second paragraph, with café."), "{ext}: {text:?}");
         }
+        // scripts/test-books.sh's novel: as a .doc, macOS leaves its last
+        // few sectors out of the FAT, and the reader must still get to the end.
+        let long = dir.join("long.txt");
+        let para = "It was the best of times, it was the worst of times. ".repeat(6);
+        std::fs::write(&long, (0..3000).map(|i| format!("{para}{i}\n\n")).collect::<String>()).unwrap();
+        let out = dir.join("long.doc");
+        assert!(std::process::Command::new("textutil").args(["-convert", "doc"]).arg(&long).arg("-output").arg(&out).status().unwrap().success());
+        let text = text(&out).unwrap();
+        assert!(text.trim_end().ends_with("worst of times. 2999"), "{:?}", &text[text.len().saturating_sub(80)..]);
     }
 }

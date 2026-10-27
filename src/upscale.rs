@@ -191,7 +191,7 @@ while read -r line; do
       out=$(printf '%s' "$line" | sed -n 's/.*"output":"\([^"]*\)".*/\1/p')
       w=$(printf '%s' "$line" | sed -n 's/.*"out_width":\([0-9]*\).*/\1/p')
       h=$(printf '%s' "$line" | sed -n 's/.*"out_height":\([0-9]*\).*/\1/p')
-      head -c $((w * h * 4)) /dev/zero | tr '\0' '\200' > "$out"
+      head -c $((w * h * 4)) /dev/zero | LC_ALL=C tr '\0' '\200' > "$out"
       printf '{"id":%s,"result":{"written":%s}}\n' "$id" $((w * h * 4)) ;;
   esac
 done
