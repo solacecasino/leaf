@@ -57,6 +57,7 @@ case "$(uname -s)" in
     cp README.md LICENSE target/stage/
     cp "$PDFIUM_DIR/bin/pdfium.dll" target/stage/
     cp "$PDFIUM_DIR/LICENSE" target/stage/LICENSE-pdfium.txt
+    cp packaging/windows/install.cmd packaging/windows/install.ps1 packaging/windows/leaf.ico target/stage/
     out="dist/Leaf-$VERSION-windows-$(arch).zip"
     rm -f "$out"
     (cd target/stage && python -m zipfile -c "../../$out" *)

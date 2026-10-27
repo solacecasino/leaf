@@ -201,6 +201,43 @@ jobs:
             if ($p.ExitCode -ne 0) { throw "--check failed on $($f.Name): $($p.ExitCode)" }
             Write-Output "ok $($f.Name)"
           }
+      - name: Add Leaf to Open with, as install.cmd does
+        shell: pwsh
+        run: |
+          $c = "HKCU:\Software\Classes"
+          function Default($k) { if (Test-Path -LiteralPath $k) { [string](Get-Item -LiteralPath $k).GetValue("") } else { "" } }
+          # Another app already opens .cbr: Leaf must leave it alone.
+          New-Item -Path "$c\.cbr" -Force | Out-Null
+          Set-Item -LiteralPath "$c\.cbr" -Value "Other.Comic"
+          cmd /c "x\install.cmd < NUL"
+          if ($LASTEXITCODE -ne 0) { throw "install.cmd failed: $LASTEXITCODE" }
+          $exe = (Resolve-Path x\Leaf.exe).Path
+          $want = '"' + $exe + '" "%1"'
+          foreach ($k in "Leaf.Comic", "Leaf.Book", "Applications\Leaf.exe", "Directory\shell\Leaf") {
+            $got = Default "$c\$k\shell\open\command"
+            if ($k -like "Directory*") { $got = Default "$c\$k\command" }
+            if ($got -ne $want) { throw "$k opens with [$got], not [$want]" }
+          }
+          if (-not (Test-Path (Join-Path (Split-Path $exe) leaf.ico))) { throw "leaf.ico is missing" }
+          foreach ($e in ".cbz", ".cb7", ".cbt") { if ((Default "$c\$e") -ne "Leaf.Comic") { throw "$e doesn't open in Leaf" } }
+          if ((Default "$c\.cbr") -ne "Other.Comic") { throw ".cbr was taken from the app that had it" }
+          foreach ($e in ".cbr", ".pdf", ".epub") {
+            $names = (Get-Item -LiteralPath "$c\$e\OpenWithProgids").GetValueNames()
+            if (-not ($names -contains "Leaf.Comic" -or $names -contains "Leaf.Book")) { throw "Leaf isn't in $e's Open with list" }
+          }
+          if ((Default "$c\.pdf") -eq "Leaf.Book") { throw ".pdf was made Leaf's" }
+          # Opening a .cbz the way a double-click does: Leaf starts with it.
+          $cmd = (Default "$c\Leaf.Comic\shell\open\command").Replace("%1", (Resolve-Path test-books\manga.cbz).Path)
+          $p = Start-Process cmd -ArgumentList "/c", "`"$cmd`"" -PassThru
+          Start-Sleep 5
+          $leaf = Get-Process Leaf -ErrorAction SilentlyContinue
+          if (-not $leaf) { throw "Leaf didn't start from the Open command" }
+          $leaf | Stop-Process
+          cmd /c "x\install.cmd --remove < NUL"
+          foreach ($k in "Leaf.Comic", "Leaf.Book", "Applications\Leaf.exe", "Directory\shell\Leaf") { if (Test-Path "$c\$k") { throw "$k is still there after --remove" } }
+          if ((Default "$c\.cbz") -ne "") { throw ".cbz still opens in Leaf after --remove" }
+          if ((Default "$c\.cbr") -ne "Other.Comic") { throw "--remove changed .cbr" }
+          Write-Output "install.cmd and --remove ok"
       - name: Self-test the upscaler on this GPU (WARP, the software one, on a runner)
         shell: bash
         run: |

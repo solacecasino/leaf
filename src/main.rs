@@ -1600,12 +1600,15 @@ impl ApplicationHandler<Event> for App {
             WindowAttributesExtX11::with_name(attrs, "leaf", "leaf")
         };
         let window = Arc::new(event_loop.create_window(attrs).expect("create the window"));
-        // X11 shows the window's own icon in the taskbar and the window
-        // switcher (Wayland takes it from leaf.desktop).
-        #[cfg(target_os = "linux")]
+        // X11 and Windows show the window's own icon in the taskbar and the
+        // window switcher (Wayland takes it from leaf.desktop).
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         if let Ok(icon) = image::load_from_memory(include_bytes!("../assets/icon-256.png")).map(|i| i.into_rgba8()) {
             let (w, h) = icon.dimensions();
-            window.set_window_icon(winit::window::Icon::from_rgba(icon.into_raw(), w, h).ok());
+            let icon = winit::window::Icon::from_rgba(icon.into_raw(), w, h).ok();
+            #[cfg(target_os = "windows")]
+            winit::platform::windows::WindowExtWindows::set_taskbar_icon(&*window, icon.clone());
+            window.set_window_icon(icon);
         }
         let context = Context::new(window.clone()).expect("connect to the display");
         self.surface = Some(Surface::new(&context, window.clone()).expect("create the drawing surface"));
