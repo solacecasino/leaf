@@ -1,114 +1,74 @@
-// Renders assets/icon.png (1024x1024) and assets/icon-256.png, the Leaf app
-// icon: a leaf whose two halves open like the pages of a book, on the same
-// dark body as Folio's icon.
-// Run: swift scripts/make_icon.swift
+// Renders assets/icon.png (1024x1024) and assets/icon-256.png: the leaf9000
+// mark, an open book (two pages side by side) on the 9000 series' graphite
+// body, the right-hand page cut on splice9000's slant into page gold, as
+// the series' icons are.
+// Run: swift scripts/make_icon.swift   (then python3 scripts/make_ico.py)
 import AppKit
 
-let size: CGFloat = 1024
-
-func render() -> NSBitmapImageRep {
-    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size), pixelsHigh: Int(size),
+func render(_ size: Int) -> NSBitmapImageRep {
+    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size,
                                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
     let ctx = NSGraphicsContext.current!.cgContext
-    let rgb = CGColorSpaceCreateDeviceRGB()
-    func color(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> CGColor {
-        NSColor(srgbRed: r, green: g, blue: b, alpha: a).cgColor
+    let k = CGFloat(size) / 1024
+    ctx.scaleBy(x: k, y: k)
+    func color(_ hex: UInt32, _ a: CGFloat = 1) -> CGColor {
+        NSColor(srgbRed: CGFloat(hex >> 16 & 0xff) / 255, green: CGFloat(hex >> 8 & 0xff) / 255,
+                blue: CGFloat(hex & 0xff) / 255, alpha: a).cgColor
     }
 
-    // Rounded-square body on Apple's icon grid (824pt body, 100pt inset).
-    let body = CGRect(x: 100, y: 100, width: 824, height: 824)
-    let bodyPath = CGPath(roundedRect: body, cornerWidth: 185, cornerHeight: 185, transform: nil)
+    // Body on Apple's icon grid: 824 square, 100 inset.
+    let body = CGPath(roundedRect: CGRect(x: 100, y: 100, width: 824, height: 824), cornerWidth: 185, cornerHeight: 185, transform: nil)
     ctx.saveGState()
-    ctx.setShadow(offset: CGSize(width: 0, height: -12), blur: 28, color: color(0, 0, 0, 0.35))
-    ctx.addPath(bodyPath)
-    ctx.setFillColor(color(0.10, 0.11, 0.12))
+    ctx.setShadow(offset: CGSize(width: 0, height: -12), blur: 28, color: color(0, 0.35))
+    ctx.addPath(body)
+    ctx.setFillColor(color(0x17181b))
     ctx.fillPath()
     ctx.restoreGState()
-
     ctx.saveGState()
-    ctx.addPath(bodyPath)
+    ctx.addPath(body)
     ctx.clip()
-    let bodyGradient = CGGradient(colorsSpace: rgb, colors: [color(0.17, 0.20, 0.19), color(0.08, 0.09, 0.10)] as CFArray, locations: [0, 1])!
-    ctx.drawLinearGradient(bodyGradient, start: CGPoint(x: 512, y: 924), end: CGPoint(x: 512, y: 100), options: [])
+    let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: [color(0x22242a), color(0x121316)] as CFArray, locations: [0, 1])!
+    ctx.drawLinearGradient(grad, start: CGPoint(x: 0, y: 924), end: CGPoint(x: 0, y: 100), options: [])
     ctx.restoreGState()
 
-    // The leaf, tilted, centred a little low so the stem has room.
-    ctx.saveGState()
-    ctx.translateBy(x: 512, y: 500)
-    ctx.rotate(by: -0.6)
-    let length: CGFloat = 330, width: CGFloat = 190
-
-    // One half of the blade, from tip to base along the midrib.
-    func half(_ side: CGFloat) -> CGPath {
-        let p = CGMutablePath()
-        p.move(to: CGPoint(x: 0, y: length))
-        p.addCurve(to: CGPoint(x: 0, y: -length),
-                   control1: CGPoint(x: side * width * 1.25, y: length * 0.55),
-                   control2: CGPoint(x: side * width * 1.05, y: -length * 0.75))
-        p.closeSubpath()
-        return p
+    // Two pages, a gutter between them (y grows upward here).
+    let (top, bottom): (CGFloat, CGFloat) = (790, 234)
+    let (w, gutter, r): (CGFloat, CGFloat, CGFloat) = (268, 36, 40)
+    let leftX = 512 - gutter / 2 - w, rightX = 512 + gutter / 2
+    func page(_ x: CGFloat) -> CGPath {
+        CGPath(roundedRect: CGRect(x: x, y: bottom, width: w, height: top - bottom), cornerWidth: r, cornerHeight: r, transform: nil)
     }
-
-    // Shadow under the whole leaf.
-    ctx.saveGState()
-    ctx.setShadow(offset: CGSize(width: 0, height: -14), blur: 30, color: color(0, 0, 0, 0.5))
-    ctx.addPath(half(-1)); ctx.addPath(half(1))
-    ctx.setFillColor(color(0.31, 0.75, 0.45))
+    ctx.addPath(page(leftX))
+    ctx.setFillColor(color(0xe8e9eb))
     ctx.fillPath()
-    ctx.restoreGState()
 
-    // Each half shaded on its own, like two facing pages.
-    for (side, top, bottom) in [(CGFloat(-1), color(0.45, 0.86, 0.56), color(0.26, 0.66, 0.40)),
-                                 (CGFloat(1), color(0.33, 0.74, 0.47), color(0.17, 0.52, 0.31))] {
+    // The right-hand page: light above, gold below a slanted cut.
+    let cut: CGFloat = 430, slant: CGFloat = 30, gap: CGFloat = 22
+    func piece(_ points: [CGPoint], _ fill: CGColor) {
+        let p = CGMutablePath()
+        p.addLines(between: points)
+        p.closeSubpath()
         ctx.saveGState()
-        ctx.addPath(half(side))
+        ctx.addPath(page(rightX))
         ctx.clip()
-        let g = CGGradient(colorsSpace: rgb, colors: [top, bottom] as CFArray, locations: [0, 1])!
-        ctx.drawLinearGradient(g, start: CGPoint(x: 0, y: length), end: CGPoint(x: side * width, y: -length), options: [])
-        // Veins: a few curves running from the midrib to the edge.
-        ctx.setStrokeColor(color(1, 1, 1, 0.16))
-        ctx.setLineWidth(9)
-        ctx.setLineCap(.round)
-        for i in 0..<5 {
-            let y = length * 0.55 - CGFloat(i) * length * 0.27
-            ctx.move(to: CGPoint(x: 0, y: y - 40))
-            ctx.addQuadCurve(to: CGPoint(x: side * width * 0.95, y: y + 45), control: CGPoint(x: side * width * 0.45, y: y + 10))
-        }
-        ctx.strokePath()
+        ctx.addPath(p)
+        ctx.setFillColor(fill)
+        ctx.fillPath()
         ctx.restoreGState()
     }
-
-    // Midrib and stem, in the cream of a page.
-    ctx.setStrokeColor(color(0.97, 0.95, 0.88))
-    ctx.setLineCap(.round)
-    ctx.setLineWidth(16)
-    ctx.move(to: CGPoint(x: 0, y: length * 0.9))
-    ctx.addLine(to: CGPoint(x: 0, y: -length))
-    ctx.addQuadCurve(to: CGPoint(x: 38, y: -length - 120), control: CGPoint(x: 0, y: -length - 70))
-    ctx.strokePath()
-    ctx.restoreGState()
-
+    let (x0, x1) = (rightX, rightX + w)
+    // The cut falls toward the right, as grace9000's does.
+    piece([CGPoint(x: x0, y: top), CGPoint(x: x1, y: top), CGPoint(x: x1, y: cut + gap / 2 - slant), CGPoint(x: x0, y: cut + gap / 2 + slant)], color(0xe8e9eb))
+    piece([CGPoint(x: x0, y: cut - gap / 2 + slant), CGPoint(x: x1, y: cut - gap / 2 - slant), CGPoint(x: x1, y: bottom), CGPoint(x: x0, y: bottom)], color(0xffc23d))
     NSGraphicsContext.restoreGraphicsState()
     return rep
 }
 
-func save(_ rep: NSBitmapImageRep, _ pixels: Int, _ path: String) {
-    let out = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
-                               bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-                               colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: out)
-    NSGraphicsContext.current!.imageInterpolation = .high
-    rep.draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels))
-    NSGraphicsContext.restoreGraphicsState()
-    try! out.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
+let dir = URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "assets")
+for (size, name) in [(1024, "icon.png"), (256, "icon-256.png"), (64, "icon-64.png"), (48, "icon-48.png"), (32, "icon-32.png"), (24, "icon-24.png"), (16, "icon-16.png")] {
+    try! render(size).representation(using: .png, properties: [:])!.write(to: dir.appendingPathComponent(name))
 }
-
-let rep = render()
-try? FileManager.default.createDirectory(atPath: "assets", withIntermediateDirectories: true)
-save(rep, 1024, "assets/icon.png")
-save(rep, 256, "assets/icon-256.png")
-print("wrote assets/icon.png and assets/icon-256.png")
+print("wrote the icons in \(dir.path)")

@@ -20,7 +20,7 @@ pub fn open(path: &Path, text: bool) {
         Command::new("xdg-open").arg(path).spawn()
     };
     if let Err(e) = result {
-        crate::log::push("leaf", format!("couldn't open {}: {e}", path.display()));
+        crate::log::push(crate::series::NAME, format!("couldn't open {}: {e}", path.display()));
     }
 }
 
@@ -159,7 +159,7 @@ pub fn copy(text: &str) {
 }
 
 /// Where a removed adapter goes, as the message says it.
-pub const TRASH: &str = if cfg!(windows) { "Leaf's Removed folder" } else { "the Trash" };
+pub const TRASH: &str = if cfg!(windows) { "leaf9000's Removed folder" } else { "the Trash" };
 
 /// Moves a folder to the Trash, where it can still be recovered, renaming
 /// it if the name is taken there. On Windows, where the Recycle Bin can't

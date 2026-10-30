@@ -245,7 +245,7 @@ pub fn decode(bytes: &[u8]) -> Result<RgbImage, String> {
             return Err("not an image macOS can read".into());
         }
         if claimed_w.saturating_mul(claimed_h) > MAX_PIXELS {
-            return Err(format!("a {claimed_w}×{claimed_h} image is bigger than Leaf will open"));
+            return Err(format!("a {claimed_w}×{claimed_h} image is bigger than leaf9000 will open"));
         }
         let orientation = number(props.0, kCGImagePropertyOrientation).unwrap_or(1);
         let image = Owned::new(CGImageSourceCreateImageAtIndex(source.0, 0, std::ptr::null())).ok_or("not an image macOS can read")?;

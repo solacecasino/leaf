@@ -169,7 +169,7 @@ impl Reader {
     /// The current entry's contents, after its header was read.
     fn data(&mut self, size: u64) -> Result<Vec<u8>, String> {
         if size > MAX_PAGE {
-            return Err(format!("a page of {} MB is more than Leaf will unpack", size / 1_048_576));
+            return Err(format!("a page of {} MB is more than leaf9000 will unpack", size / 1_048_576));
         }
         let mut out = Vec::with_capacity(size as usize);
         let mut buf = vec![0u8; 1 << 16];
@@ -182,7 +182,7 @@ impl Reader {
                 n => {
                     out.extend_from_slice(&buf[..n as usize]);
                     if out.len() as u64 > MAX_PAGE {
-                        return Err("a page bigger than Leaf will unpack".into());
+                        return Err("a page bigger than leaf9000 will unpack".into());
                     }
                 }
             }
@@ -318,7 +318,7 @@ mod tests {
         let rar = dir.join("book.cbr");
         let made = std::process::Command::new("rar").arg("a").arg("-r").arg("-idq").arg(&rar).arg("Chapter 1").current_dir(dir.join("in")).status();
         if !made.is_ok_and(|s| s.success()) {
-            assert!(std::env::var_os("LEAF_REQUIRE_RAR").is_none(), "rar isn't installed");
+            assert!(crate::series::env("REQUIRE_RAR").is_none(), "rar isn't installed");
             eprintln!("skipped: rar isn't installed");
             return;
         }

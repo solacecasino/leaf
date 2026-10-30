@@ -1,7 +1,7 @@
 # Upscale 4K
 
-A [Leaf](https://github.com/solacecasino/leaf) adapter that upscales pages on
-the GPU whenever Leaf shows one bigger than it is: on a 4K (or Retina)
+A [leaf9000](https://github.com/solacecasino/leaf9000) adapter that upscales pages on
+the GPU whenever leaf9000 shows one bigger than it is: on a 4K (or Retina)
 screen, in full screen, for webtoons widened to the window, and in the
 magnifier.
 
@@ -21,8 +21,8 @@ shaders, written for comic and manga pages, do it in a few steps:
    aren't over-sharpened, and nothing goes past its neighbours (no halos).
 
 Manga and webtoons get all four (**lines**); colour comics get 1 and 4
-(**soft**). Leaf picks by the book's reading mode; `upscale_style` in
-Leaf's settings.toml can fix it to one.
+(**soft**). leaf9000 picks by the book's reading mode; `upscale_style` in
+leaf9000's settings.toml can fix it to one.
 
 `upscale_strength` in settings.toml sets how hard it works (Leaf 0.0.5 and
 later):
@@ -40,8 +40,8 @@ there.
 ## Install
 
 Download the zip for your computer from
-[Leaf's releases](https://github.com/solacecasino/leaf/releases) and drop it
-on Leaf's window. Leaf shows what it is and asks before installing. It's on
+[leaf9000's releases](https://github.com/solacecasino/leaf9000/releases) and drop it
+on leaf9000's window. leaf9000 shows what it is and asks before installing. It's on
 from then on: **View → Upscale Pages** (U) turns it off and on.
 
 | Download | For |
@@ -58,32 +58,32 @@ upscale them. It never goes online.
 `upscale-4k --bench` times it on your GPU; `upscale-4k --selftest` checks
 it (crisp edges, lines that keep their weight, untouched paper, smooth
 gradients, every strength). On an Apple M2, a 1200×1700 page upscaled to
-2711×3840 (a page on a 4K screen), through Leaf, median of 4 runs:
+2711×3840 (a page on a 4K screen), through leaf9000, median of 4 runs:
 
 | | Each page |
 |---|---|
-| Leaf's own scaler (CPU, no retracing) | 48 ms |
+| leaf9000's own scaler (CPU, no retracing) | 48 ms |
 | Line art (lines) | 32 ms |
 | Colour (soft) | 22.5 ms |
 | A webtoon band (512 rows) | 5–6 ms |
 
 The shaders themselves take 14–16 ms (lines) and 5.2 ms (soft) a page when
 the GPU is busy; the rest is the GPU waking up and handing the picture back.
-Leaf never waits for it: pages show at once, scaled by Leaf, and the
+leaf9000 never waits for it: pages show at once, scaled by leaf9000, and the
 upscaled ones replace them as they arrive.
 
 **Memory.** Upscaling 4K pages, the adapter uses 148 MB (on Apple
 Silicon, where the GPU's memory is the computer's): page-sized working
-buffers, kept between pages so each page doesn't make them again. Leaf
+buffers, kept between pages so each page doesn't make them again. leaf9000
 itself uses no more than it would without the adapter (about 42 MB for
 each 4K page it keeps ready, either way). On a graphics card with memory
 of its own, the buffers are on the card, plus one more to copy each page
 back. Two files of the page's size sit in
-Leaf's temporary folder while it runs.
+leaf9000's temporary folder while it runs.
 
 **It needs a real GPU.** Where the only one is drawn by the CPU (a virtual
 machine, Remote Desktop, Windows without its graphics driver), it's far
-slower than Leaf's own scaling, so the adapter turns it down and Leaf says
+slower than leaf9000's own scaling, so the adapter turns it down and leaf9000 says
 "Upscaling isn't available". Measured on GitHub's runners, line art /
 colour a page:
 
@@ -97,12 +97,12 @@ colour a page:
 `UPSCALE_SOFTWARE=1` uses one anyway. `--selftest` and `--bench` always
 run, and say when the GPU is a software one.
 
-## How it talks to Leaf
+## How it talks to leaf9000
 
-It's an ordinary Leaf adapter (protocol 3, `filters = ["upscale"]`): Leaf
+It's an ordinary leaf9000 adapter (protocol 3, `filters = ["upscale"]`): leaf9000
 sends `upscale.ready` when it starts (the GPU is set up then), then
 `page.upscale` with two files' paths, the source (RGB) and the result
-(0RGB), which both map into memory. See Leaf's
+(0RGB), which both map into memory. See leaf9000's
 [adapter docs](../../docs/adapters.md).
 
 ## Building
@@ -113,4 +113,4 @@ cargo build --release
 ```
 
 Then put `upscale-4k` (or `upscale-4k.exe`, with `run` changed to match)
-in a folder with `adapter.toml`, and drop the folder on Leaf.
+in a folder with `adapter.toml`, and drop the folder on leaf9000.

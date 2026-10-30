@@ -1,4 +1,4 @@
-# Builds and tests Leaf on every system it runs on: macOS (Apple Silicon and
+# Builds and tests leaf9000 on every system it runs on: macOS (Apple Silicon and
 # Intel), Windows (x64 and Arm) and Linux (x64 and Arm). Each download is
 # checked by opening a book in every format with it, and the adapters in
 # adapters/ are built and self-tested on each machine's GPU. Pushing a tag
@@ -80,7 +80,7 @@ jobs:
         env:
           LEAF_REQUIRE_PDFIUM: "1"
         run: LEAF_PDFIUM=$PWD/pdfium/lib/libpdfium.dylib cargo test
-      - name: Package Leaf and the adapters
+      - name: Package leaf9000 and the adapters
         run: |
           scripts/package.sh
           scripts/package-adapter.sh upscale-4k
@@ -91,9 +91,9 @@ jobs:
       - name: Check that each download opens every kind of book
         run: |
           set -e
-          for zip in dist/Leaf-*-macos-*.zip; do
+          for zip in dist/leaf9000-*-macos-*.zip; do
             rm -rf x && ditto -x -k "$zip" x
-            app=x/Leaf.app/Contents/MacOS/leaf
+            app=x/leaf9000.app/Contents/MacOS/leaf9000
             echo "== $zip: $(lipo -archs "$app")"
             case "$zip" in *universal*) lipo -archs "$app" | grep -q x86_64 && lipo -archs "$app" | grep -q arm64 ;; esac
             "$app" --version
@@ -105,14 +105,14 @@ jobs:
           rm -rf a && mkdir a && cd a && unzip -q ../dist/upscale-4k-*-macos-universal.zip
           ./upscale-4k/upscale-4k --selftest
           ./upscale-4k/upscale-4k --bench
-          # A real GPU is offered to Leaf.
+          # A real GPU is offered to leaf9000.
           printf '{"id":1,"method":"upscale.ready"}\n' | ./upscale-4k/upscale-4k | tee ready.json
           grep -q '"device"' ready.json
-      - name: Install the adapter's zip as a drop on Leaf does, and run it
+      - name: Install the adapter's zip as a drop on leaf9000 does, and run it
         run: LEAF_ADAPTER_ZIP=$(echo $PWD/dist/upscale-4k-*-macos-universal.zip) cargo test installs_and_runs_a_released_zip -- --nocapture
       - uses: actions/upload-artifact@v4
         with:
-          name: leaf-macos
+          name: leaf9000-macos
           path: dist/*
           if-no-files-found: error
 
@@ -130,7 +130,7 @@ jobs:
           cargo test
       - uses: actions/download-artifact@v4
         with:
-          name: leaf-macos
+          name: leaf9000-macos
           path: dist
       - uses: actions/download-artifact@v4
         with:
@@ -140,10 +140,10 @@ jobs:
         run: |
           set -e
           uname -m
-          for zip in dist/Leaf-*-macos-x64.zip dist/Leaf-*-macos-universal.zip; do
+          for zip in dist/leaf9000-*-macos-x64.zip dist/leaf9000-*-macos-universal.zip; do
             rm -rf x && ditto -x -k "$zip" x
             echo "== $zip"
-            for f in test-books/*; do arch -x86_64 x/Leaf.app/Contents/MacOS/leaf --check "$f"; done
+            for f in test-books/*; do arch -x86_64 x/leaf9000.app/Contents/MacOS/leaf9000 --check "$f"; done
           done
       - name: Self-test the upscaler on this GPU
         run: |
@@ -179,7 +179,7 @@ jobs:
         env:
           LEAF_REQUIRE_PDFIUM: "1"
         run: LEAF_PDFIUM="$PWD/pdfium/bin/pdfium.dll" cargo test
-      - name: Package Leaf and the adapters
+      - name: Package leaf9000 and the adapters
         shell: bash
         run: |
           PDFIUM_DIR="$PWD/pdfium" scripts/package.sh
@@ -195,48 +195,52 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force x | Out-Null
-          Expand-Archive -Force (Get-ChildItem dist\Leaf-*-windows-*.zip).FullName x
+          Expand-Archive -Force (Get-ChildItem dist\leaf9000-*-windows-*.zip).FullName x
           foreach ($f in Get-ChildItem test-books) {
-            $p = Start-Process -FilePath x\Leaf.exe -ArgumentList '--check', ('"' + $f.FullName + '"') -Wait -PassThru -NoNewWindow
+            $p = Start-Process -FilePath x\leaf9000.exe -ArgumentList '--check', ('"' + $f.FullName + '"') -Wait -PassThru -NoNewWindow
             if ($p.ExitCode -ne 0) { throw "--check failed on $($f.Name): $($p.ExitCode)" }
             Write-Output "ok $($f.Name)"
           }
-      - name: Add Leaf to Open with, as install.cmd does
+      - name: Add leaf9000 to Open with, as install.cmd does
         shell: pwsh
         run: |
           $c = "HKCU:\Software\Classes"
           function Default($k) { if (Test-Path -LiteralPath $k) { [string](Get-Item -LiteralPath $k).GetValue("") } else { "" } }
-          # Another app already opens .cbr: Leaf must leave it alone.
+          # Another app already opens .cbr: leaf9000 must leave it alone.
+          # And Leaf, before the rename, had its own entries: they go.
+          New-Item -Path "$c\Applications\Leaf.exe\shell\open\command" -Force | Out-Null
+          New-Item -Path "$c\Directory\shell\Leaf\command" -Force | Out-Null
           New-Item -Path "$c\.cbr" -Force | Out-Null
           Set-Item -LiteralPath "$c\.cbr" -Value "Other.Comic"
           cmd /c "x\install.cmd < NUL"
           if ($LASTEXITCODE -ne 0) { throw "install.cmd failed: $LASTEXITCODE" }
-          $exe = (Resolve-Path x\Leaf.exe).Path
+          $exe = (Resolve-Path x\leaf9000.exe).Path
           $want = '"' + $exe + '" "%1"'
-          foreach ($k in "Leaf.Comic", "Leaf.Book", "Applications\Leaf.exe", "Directory\shell\Leaf") {
+          foreach ($k in "Leaf.Comic", "Leaf.Book", "Applications\leaf9000.exe", "Directory\shell\leaf9000") {
             $got = Default "$c\$k\shell\open\command"
             if ($k -like "Directory*") { $got = Default "$c\$k\command" }
             if ($got -ne $want) { throw "$k opens with [$got], not [$want]" }
           }
-          if (-not (Test-Path (Join-Path (Split-Path $exe) leaf.ico))) { throw "leaf.ico is missing" }
-          foreach ($e in ".cbz", ".cb7", ".cbt") { if ((Default "$c\$e") -ne "Leaf.Comic") { throw "$e doesn't open in Leaf" } }
+          if (-not (Test-Path (Join-Path (Split-Path $exe) leaf9000.ico))) { throw "leaf9000.ico is missing" }
+          foreach ($k in "Applications\Leaf.exe", "Directory\shell\Leaf") { if (Test-Path "$c\$k") { throw "Leaf's $k is still there" } }
+          foreach ($e in ".cbz", ".cb7", ".cbt") { if ((Default "$c\$e") -ne "Leaf.Comic") { throw "$e doesn't open in leaf9000" } }
           if ((Default "$c\.cbr") -ne "Other.Comic") { throw ".cbr was taken from the app that had it" }
           foreach ($e in ".cbr", ".pdf", ".epub") {
             $names = (Get-Item -LiteralPath "$c\$e\OpenWithProgids").GetValueNames()
-            if (-not ($names -contains "Leaf.Comic" -or $names -contains "Leaf.Book")) { throw "Leaf isn't in $e's Open with list" }
+            if (-not ($names -contains "Leaf.Comic" -or $names -contains "Leaf.Book")) { throw "leaf9000 isn't in $e's Open with list" }
           }
-          if ((Default "$c\.pdf") -eq "Leaf.Book") { throw ".pdf was made Leaf's" }
-          # Opening a .cbz the way a double-click does: Leaf starts with it.
+          if ((Default "$c\.pdf") -eq "Leaf.Book") { throw ".pdf was made leaf9000's" }
+          # Opening a .cbz the way a double-click does: leaf9000 starts with it.
           $cmd = (Default "$c\Leaf.Comic\shell\open\command").Replace("%1", (Resolve-Path test-books\manga.cbz).Path)
           $p = Start-Process cmd -ArgumentList "/c", "`"$cmd`"" -PassThru
           Start-Sleep 5
-          $leaf = Get-Process Leaf -ErrorAction SilentlyContinue
-          if (-not $leaf) { throw "Leaf didn't start from the Open command" }
+          $leaf = Get-Process leaf9000 -ErrorAction SilentlyContinue
+          if (-not $leaf) { throw "leaf9000 didn't start from the Open command" }
           $leaf | Stop-Process
           cmd /c "x\install.cmd --remove < NUL"
           if ($LASTEXITCODE -ne 0) { throw "install.cmd --remove failed: $LASTEXITCODE" }
-          foreach ($k in "Leaf.Comic", "Leaf.Book", "Applications\Leaf.exe", "Directory\shell\Leaf") { if (Test-Path "$c\$k") { throw "$k is still there after --remove" } }
-          if ((Default "$c\.cbz") -ne "") { throw ".cbz still opens in Leaf after --remove" }
+          foreach ($k in "Leaf.Comic", "Leaf.Book", "Applications\leaf9000.exe", "Directory\shell\leaf9000") { if (Test-Path "$c\$k") { throw "$k is still there after --remove" } }
+          if ((Default "$c\.cbz") -ne "") { throw ".cbz still opens in leaf9000 after --remove" }
           if ((Default "$c\.cbr") -ne "Other.Comic") { throw "--remove changed .cbr" }
           Write-Output "install.cmd and --remove ok"
       - name: Self-test the upscaler on this GPU (WARP, the software one, on a runner)
@@ -245,10 +249,10 @@ jobs:
           rm -rf a && mkdir a && cd a && unzip -q ../dist/upscale-4k-*-windows-*.zip
           ./upscale-4k/upscale-4k.exe --selftest
           # No --bench: a software GPU's times say nothing about a real one.
-          # The software GPU is turned down, so Leaf scales by itself.
+          # The software GPU is turned down, so leaf9000 scales by itself.
           printf '{"id":1,"method":"upscale.ready"}\n' | ./upscale-4k/upscale-4k.exe | tee ready.json
           grep -q 'drawn by the CPU' ready.json
-      - name: Install the adapter's zip as a drop on Leaf does, and run it
+      - name: Install the adapter's zip as a drop on leaf9000 does, and run it
         shell: bash
         run: LEAF_ADAPTER_ZIP=$(echo $PWD/dist/upscale-4k-*-windows-*.zip) cargo test installs_and_runs_a_released_zip -- --nocapture
       - name: Screenshots
@@ -266,14 +270,14 @@ jobs:
             $img.Save("shots\$name.png")
           }
           foreach ($book in "manga.cbr", "novel.docx", "page.pdf") {
-            $p = Start-Process -FilePath x\Leaf.exe -ArgumentList ('"' + (Resolve-Path "test-books\$book") + '"') -PassThru
+            $p = Start-Process -FilePath x\leaf9000.exe -ArgumentList ('"' + (Resolve-Path "test-books\$book") + '"') -PassThru
             Start-Sleep 6
             Shot $book
             Stop-Process -Id $p.Id
           }
       - uses: actions/upload-artifact@v4
         with:
-          name: leaf-windows-${{ matrix.arch }}
+          name: leaf9000-windows-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
@@ -316,7 +320,7 @@ jobs:
         run: |
           if [ "${{ matrix.arch }}" = x64 ]; then export LEAF_REQUIRE_RAR=1; fi
           LEAF_PDFIUM=$PWD/pdfium/lib/libpdfium.so cargo test
-      - name: Package Leaf and the adapters
+      - name: Package leaf9000 and the adapters
         run: |
           PDFIUM_DIR=$PWD/pdfium scripts/package.sh
           scripts/package-adapter.sh upscale-4k
@@ -330,11 +334,11 @@ jobs:
       - name: Check that the download opens every kind of book
         run: |
           set -e
-          mkdir -p x && tar xzf dist/leaf-*-linux-*.tar.gz -C x
-          leaf=$(echo x/leaf-*/leaf)
+          mkdir -p x && tar xzf dist/leaf9000-*-linux-*.tar.gz -C x
+          leaf=$(echo x/leaf9000-*/leaf9000)
           "$leaf" --version
           for f in test-books/*; do "$leaf" --check "$f"; done
-      - name: Add Leaf to the app menu, as install.sh does for people
+      - name: Add leaf9000 to the app menu, as install.sh does for people
         run: |
           set -e
           sudo apt-get install -y desktop-file-utils xdg-utils
@@ -344,27 +348,32 @@ jobs:
           mkdir -p "$XDG_DATA_HOME/applications"
           printf '[Desktop Entry]\nType=Application\nName=Other\nExec=true %%f\n' > "$XDG_DATA_HOME/applications/other.desktop"
           xdg-mime default other.desktop application/x-cbt
-          x/leaf-*/install.sh
-          desktop-file-validate "$XDG_DATA_HOME/applications/leaf.desktop"
-          cat "$XDG_DATA_HOME/applications/leaf.desktop"
-          test -f "$XDG_DATA_HOME/icons/hicolor/256x256/apps/leaf.png"
-          test "$(xdg-mime query default application/vnd.comicbook+zip)" = leaf.desktop
-          test "$(xdg-mime query default application/vnd.comicbook-rar)" = leaf.desktop
-          test "$(xdg-mime query default application/x-cbt)" = other.desktop
-          # The Exec line really starts this Leaf.
-          exe=$(sed -n 's/^Exec="\(.*\)" %f$/\1/p' "$XDG_DATA_HOME/applications/leaf.desktop")
-          "$exe" --version
-          x/leaf-*/install.sh --remove
+          # Leaf, before the rename, was in the menu and opened .cb7.
+          printf '[Desktop Entry]\nType=Application\nName=Leaf\nExec=true %%f\n' > "$XDG_DATA_HOME/applications/leaf.desktop"
+          xdg-mime default leaf.desktop application/x-cb7
+          x/leaf9000-*/install.sh
+          desktop-file-validate "$XDG_DATA_HOME/applications/leaf9000.desktop"
+          cat "$XDG_DATA_HOME/applications/leaf9000.desktop"
+          test -f "$XDG_DATA_HOME/icons/hicolor/256x256/apps/leaf9000.png"
           test ! -e "$XDG_DATA_HOME/applications/leaf.desktop"
+          test "$(xdg-mime query default application/vnd.comicbook+zip)" = leaf9000.desktop
+          test "$(xdg-mime query default application/vnd.comicbook-rar)" = leaf9000.desktop
+          test "$(xdg-mime query default application/x-cb7)" = leaf9000.desktop
+          test "$(xdg-mime query default application/x-cbt)" = other.desktop
+          # The Exec line really starts this leaf9000.
+          exe=$(sed -n 's/^Exec="\(.*\)" %f$/\1/p' "$XDG_DATA_HOME/applications/leaf9000.desktop")
+          "$exe" --version
+          x/leaf9000-*/install.sh --remove
+          test ! -e "$XDG_DATA_HOME/applications/leaf9000.desktop"
       - name: Self-test the upscaler on this GPU (lavapipe, the software one, on a runner)
         run: |
           rm -rf a && mkdir a && cd a && unzip -q ../dist/upscale-4k-*-linux-*.zip
           ./upscale-4k/upscale-4k --selftest
           # No --bench: a software GPU's times say nothing about a real one.
-          # The software GPU is turned down, so Leaf scales by itself.
+          # The software GPU is turned down, so leaf9000 scales by itself.
           printf '{"id":1,"method":"upscale.ready"}\n' | ./upscale-4k/upscale-4k | tee ready.json
           grep -q 'drawn by the CPU' ready.json
-      - name: Install the adapter's zip as a drop on Leaf does, and run it
+      - name: Install the adapter's zip as a drop on leaf9000 does, and run it
         run: LEAF_ADAPTER_ZIP=$(echo $PWD/dist/upscale-4k-*-linux-*.zip) cargo test installs_and_runs_a_released_zip -- --nocapture
       - name: Screenshots
         if: matrix.arch == 'x64'
@@ -376,7 +385,7 @@ jobs:
           sleep 2
           openbox &
           sleep 1
-          leaf=$(echo x/leaf-*/leaf)
+          leaf=$(echo x/leaf9000-*/leaf9000)
           for book in manga.cb7 novel.odt page.pdf; do
             "$leaf" "test-books/$book" &
             pid=$!
@@ -386,7 +395,7 @@ jobs:
           done
       - uses: actions/upload-artifact@v4
         with:
-          name: leaf-linux-${{ matrix.arch }}
+          name: leaf9000-linux-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
@@ -404,7 +413,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: leaf-*
+          pattern: leaf9000-*
       - name: Gather, refusing two files with the same name
         run: |
           mkdir out
@@ -420,4 +429,4 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           notes="docs/releases/${tag}.md"
           if [ -f "$notes" ]; then set -- --notes-file "$notes"; else set -- --generate-notes; fi
-          gh release create "$tag" out/* --title "Leaf ${tag#v}" "$@"
+          gh release create "$tag" out/* --title "leaf9000 ${tag#v}" "$@"

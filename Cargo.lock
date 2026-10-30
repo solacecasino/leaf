@@ -1327,8 +1327,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
-name = "leaf"
-version = "0.0.6"
+name = "leaf9000"
+version = "0.0.7"
 dependencies = [
  "avif-decode",
  "cosmic-text",
@@ -1340,6 +1340,7 @@ dependencies = [
  "memmap2",
  "muda",
  "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "pdfium-render",
  "psd",

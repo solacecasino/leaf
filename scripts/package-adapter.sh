@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds an adapter from adapters/<name> and packages it for this system as
-# dist/<name>-<version>-<platform>.zip, ready to drop on Leaf's window (on
+# dist/<name>-<version>-<platform>.zip, ready to drop on leaf9000's window (on
 # macOS one universal zip for both kinds of Mac).
 # Usage: scripts/package-adapter.sh upscale-4k
 set -e

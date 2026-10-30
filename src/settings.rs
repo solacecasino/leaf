@@ -1,17 +1,17 @@
 //! `settings.toml`: the things that would otherwise be fixed in the code.
-//! Leaf writes it on first run with every setting commented out, so it
+//! leaf9000 writes it on first run with every setting commented out, so it
 //! starts bare; a line you uncomment changes only that. Saved changes apply
 //! straight away. A mistake shows in the title bar and the rest still works.
 
 use serde::Deserialize;
 use std::sync::{Arc, RwLock};
 
-const EXAMPLE: &str = r##"# Leaf settings. Every line is commented out, so Leaf uses its own choice;
+const EXAMPLE: &str = r##"# leaf9000 settings. Every line is commented out, so it uses its own choice;
 # remove the # in front of one to change it. Saved changes apply straight
 # away (the text book settings, the next time a text book opens).
 
-# background = "#1b1b1d"     # behind the pages
-# accent = "#4fbf73"         # the progress line, the drop outline, the magnifier's edge
+# background = "#17181b"     # behind the pages: the 9000 series' graphite
+# accent = "#ffc23d"         # the progress line, the drop outline, the magnifier's edge
 # progress = true            # the thin progress line along the bottom
 # page_gap = 0               # points between two pages side by side
 # webtoon_width = 800        # the widest a webtoon strip is drawn, in points
@@ -29,6 +29,9 @@ const EXAMPLE: &str = r##"# Leaf settings. Every line is commented out, so Leaf 
 # size = 17
 # paper = "#faf7f0"
 # ink = "#211f1c"
+
+# [apps]                     # the other 9000 apps, if leaf9000 doesn't find them itself
+# grace9000 = "/Applications/grace9000.app"
 "##;
 
 #[derive(Deserialize, Clone, Debug)]
@@ -46,6 +49,8 @@ pub struct Settings {
     pub upscale_style: String,
     pub upscale_strength: String,
     pub text: TextSettings,
+    /// Where the sister apps are, by name (`[apps]`).
+    pub apps: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq)]
@@ -60,8 +65,8 @@ pub struct TextSettings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            background: Color(0x1b1b1d),
-            accent: Color(0x4fbf73),
+            background: Color(crate::series::GRAPHITE),
+            accent: Color(crate::series::GOLD),
             progress: true,
             page_gap: 0.0,
             webtoon_width: 800.0,
@@ -72,6 +77,7 @@ impl Default for Settings {
             upscale_style: "auto".into(),
             upscale_strength: "normal".into(),
             text: TextSettings::default(),
+            apps: Default::default(),
         }
     }
 }
@@ -106,7 +112,7 @@ impl<'de> Deserialize<'de> for Color {
 
 const KNOWN: &[&str] = &[
     "background", "accent", "progress", "page_gap", "webtoon_width", "default_mode", "color_threshold",
-    "continue_to_next", "magnifier_zoom", "upscale_style", "upscale_strength", "text",
+    "continue_to_next", "magnifier_zoom", "upscale_style", "upscale_strength", "text", "apps",
 ];
 const KNOWN_TEXT: &[&str] = &["font", "size", "paper", "ink"];
 
@@ -119,7 +125,7 @@ pub fn get() -> Arc<Settings> {
 
 /// Reads settings.toml (writing the commented example the first time).
 /// Returns any problem with it so it can be shown; a bad file never stops
-/// Leaf, it just keeps the built-in choices.
+/// leaf9000, it just keeps the built-in choices.
 pub fn load() -> Option<String> {
     let path = crate::state::dir().join("settings.toml");
     let text = std::fs::read_to_string(&path).ok();
@@ -144,6 +150,11 @@ fn parse(text: &str) -> (Settings, Option<String>) {
     if let Some(text) = table.get("text").and_then(|t| t.as_table()) {
         for key in text.keys().filter(|k| !KNOWN_TEXT.contains(&k.as_str())) {
             problem = Some(format!("settings.toml: unknown setting \"text.{key}\""));
+        }
+    }
+    if let Some(apps) = table.get("apps").and_then(|t| t.as_table()) {
+        for key in apps.keys().filter(|k| crate::series::sibling(k).is_none()) {
+            problem = Some(format!("settings.toml: [apps] has \"{key}\"; it knows text9000, splice9000, wave9000 and grace9000"));
         }
     }
     let mut settings: Settings = match table.try_into() {
@@ -211,6 +222,11 @@ mod tests {
         let (s, problem) = parse("upscale_strength = \"max\"");
         assert_eq!(s.upscale_strength, "normal");
         assert!(problem.unwrap().contains("use gentle, normal or strong"));
+
+        let (s, problem) = parse("[apps]\ngrace9000 = \"/x/grace9000.app\"\n");
+        assert!(problem.is_none());
+        assert_eq!(s.apps.get("grace9000").map(String::as_str), Some("/x/grace9000.app"));
+        assert!(parse("[apps]\ngrace = \"/x\"\n").1.unwrap().contains("[apps] has \"grace\""));
 
         let (s, problem) = parse("accent = \"green\"");
         assert_eq!(s.accent, Settings::default().accent);

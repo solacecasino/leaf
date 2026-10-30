@@ -1,11 +1,11 @@
-# Leaf adapters
+# leaf9000 adapters
 
-Adapters are optional add-ons for [Leaf](../README.md): separate programs
+Adapters are optional add-ons for [leaf9000](../README.md): separate programs
 that add commands, open more kinds of books, or (new in Leaf 0.0.4) change
-how pages look. Leaf ships with none. Each one here is built with Leaf's
-releases, for every system Leaf runs on; download its zip from
-[the releases page](https://github.com/solacecasino/leaf/releases) and drop
-it on Leaf's window.
+how pages look. leaf9000 ships with none. Each one here is built with leaf9000's
+releases, for every system leaf9000 runs on; download its zip from
+[the releases page](https://github.com/solacecasino/leaf9000/releases) and drop
+it on leaf9000's window.
 
 | Adapter | What it does | Needs |
 |---|---|---|

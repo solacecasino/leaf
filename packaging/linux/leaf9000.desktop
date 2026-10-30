@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=leaf9000
+GenericName=Comic Reader
+Comment=The 9000 series' reader: comics and manga that open where you left off
+Exec=leaf9000 %f
+Icon=leaf9000
+Terminal=false
+Categories=Graphics;Viewer;
+Keywords=comic;manga;webtoon;cbz;cbr;reader;leaf;9000;
+MimeType=
+StartupWMClass=leaf9000

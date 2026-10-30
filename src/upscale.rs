@@ -136,9 +136,9 @@ impl Upscaler {
                 return Err("the upscaled picture couldn't be read".into());
             }
             let px = body.iter().map(|&p| u32::from_le(p) & 0x00ff_ffff).collect();
-            if std::env::var_os("LEAF_TIMING").is_some() {
+            if crate::series::env("TIMING").is_some() {
                 eprintln!(
-                    "leaf: upscaled {w}x{}: sent {sent:?}, answered {:?} (adapter {} ms), taken in {:?}",
+                    "leaf9000: upscaled {w}x{}: sent {sent:?}, answered {:?} (adapter {} ms), taken in {:?}",
                     r1 - r0,
                     answered - sent,
                     answer["total_ms"].as_f64().map_or("?".into(), |t| format!("{t:.1}")),
@@ -149,7 +149,7 @@ impl Upscaler {
         });
         if let Err(e) = &result {
             if !self.failed.swap(true, Ordering::SeqCst) {
-                crate::log::push("leaf", format!("upscaling stopped: {e}"));
+                crate::log::push(crate::series::NAME, format!("upscaling stopped: {e}"));
             }
         }
         result
@@ -258,7 +258,7 @@ done
     #[test]
     #[ignore]
     fn four_k_pages_cpu_and_gpu() {
-        let Some(program) = std::env::var_os("LEAF_UPSCALER") else { return };
+        let Some(program) = crate::series::env("UPSCALER") else { return };
         let page = manga_page(1200, 1700);
         let target = Target { w: 2711, h: 3840, fit: Fit::Page };
         let (w, h) = scaled_size(1200, 1700, target);
@@ -295,7 +295,7 @@ done
     #[test]
     #[ignore]
     fn four_k_memory() {
-        let Some(program) = std::env::var_os("LEAF_UPSCALER") else { return };
+        let Some(program) = crate::series::env("UPSCALER") else { return };
         let mb = || crate::platform::memory_use().map_or(0.0, |(now, _)| now as f64 / 1e6);
         let page = manga_page(1200, 1700);
         let target = Target { w: 2711, h: 3840, fit: Fit::Page };

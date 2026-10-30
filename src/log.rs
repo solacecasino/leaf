@@ -1,5 +1,5 @@
 //! Leaf's log: what adapters print and anything that went wrong, written to
-//! `leaf.log` in the config folder (started fresh each launch). Help → Show
+//! `leaf9000.log` in the config folder (started fresh each launch). Help → Show
 //! Log opens it, so problems can be read without a terminal. Paths in it
 //! show ~ for the home folder, since people paste logs into public issues.
 //!
@@ -22,7 +22,7 @@ const MAX_LOG: u64 = 8 * 1024 * 1024;
 static WRITTEN: Mutex<u64> = Mutex::new(0);
 
 pub fn path() -> PathBuf {
-    crate::state::dir().join("leaf.log")
+    crate::state::dir().join("leaf9000.log")
 }
 
 fn crash_file() -> PathBuf {
@@ -35,7 +35,7 @@ pub fn init() {
     *FILE.lock().unwrap_or_else(|e| e.into_inner()) = File::create(path()).ok();
 }
 
-/// Adds a line, from `source` ("leaf" or an adapter's name).
+/// Adds a line, from `source` ("leaf9000" or an adapter's name).
 pub fn push(source: &str, text: impl AsRef<str>) {
     let secs = START.get_or_init(Instant::now).elapsed().as_secs_f64();
     let text = crate::platform::hide_home(text.as_ref());
@@ -76,14 +76,14 @@ pub fn catch_crashes() {
     std::panic::set_hook(Box::new(move |info| {
         let thread = std::thread::current().name().unwrap_or("unnamed").to_owned();
         let text = format!(
-            "Leaf {} on {} {}, thread {thread}: {info}",
+            "leaf9000 {} on {} {}, thread {thread}: {info}",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH
         );
         let _ = std::fs::create_dir_all(crate::state::dir());
         let _ = std::fs::write(crash_file(), crate::platform::hide_home(&text));
-        push("leaf", format!("crashed: {info}"));
+        push(crate::series::NAME, format!("crashed: {info}"));
         default(info);
     }));
 }

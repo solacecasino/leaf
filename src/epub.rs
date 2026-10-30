@@ -76,7 +76,7 @@ pub fn read<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Result<(Co
         return Ok((Content::Images(images), meta));
     }
     if letters == 0 {
-        return Err("this EPUB has no pages Leaf can show".into());
+        return Err("this EPUB has no pages leaf9000 can show".into());
     }
     // Writing: neighbouring runs joined into one, and only real pictures kept.
     let mut out: Vec<Block> = Vec::new();

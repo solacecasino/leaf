@@ -188,7 +188,7 @@ impl Host {
             if self.all[i].manifest.start == Start::Launch
                 && let Err(e) = self.start(i)
             {
-                crate::log::push("leaf", e);
+                crate::log::push(crate::series::NAME, e);
             }
         }
     }
@@ -287,9 +287,9 @@ impl Host {
 
         link.notify(
             "initialize",
-            json!({ "leaf": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL, "permissions": manifest.permissions }),
+            json!({ "leaf": env!("CARGO_PKG_VERSION"), "leaf9000": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL, "permissions": manifest.permissions }),
         );
-        crate::log::push("leaf", format!("started {} {}", manifest.name, manifest.version));
+        crate::log::push(crate::series::NAME, format!("started {} {}", manifest.name, manifest.version));
         self.all[i].running = Some(Running { child, link: link.clone(), generation });
         Ok(link)
     }
@@ -335,7 +335,7 @@ impl Host {
         }
         let mut r = self.all[i].running.take().expect("checked");
         let status = r.child.wait().map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
-        crate::log::push("leaf", format!("{adapter} stopped ({status})"));
+        crate::log::push(crate::series::NAME, format!("{adapter} stopped ({status})"));
         true
     }
 
@@ -437,6 +437,8 @@ fn spawn(dir: &Path, run: &[String]) -> Result<Child, String> {
         .args(args)
         .current_dir(dir)
         // So adapters can keep their own files next to Leaf's.
+        .env("LEAF9000_CONFIG_DIR", crate::state::dir())
+        // Adapters written for Leaf read it under its old name.
         .env("LEAF_CONFIG_DIR", crate::state::dir())
         .env("PYTHONIOENCODING", "utf-8")
         .stdin(Stdio::piped())
@@ -472,7 +474,7 @@ fn discover_in(root: &Path) -> Vec<Adapter> {
                 found.retain(|a| a.manifest.name != manifest.name);
                 found.push(Adapter { dir, manifest, running: None });
             }
-            Err(e) => crate::log::push("leaf", e),
+            Err(e) => crate::log::push(crate::series::NAME, e),
         }
     }
     found
@@ -487,7 +489,7 @@ fn load_manifest(dir: &Path) -> Result<Manifest, String> {
     }
     for p in &manifest.permissions {
         if !KNOWN_PERMISSIONS.contains(&p.as_str()) {
-            crate::log::push("leaf", format!("{}: unknown permission \"{p}\"", manifest.name));
+            crate::log::push(crate::series::NAME, format!("{}: unknown permission \"{p}\"", manifest.name));
         }
     }
     Ok(manifest)
@@ -553,7 +555,7 @@ fn install_into(source: &Path, root: &Path) -> Result<Manifest, String> {
     Ok(manifest)
 }
 
-fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+pub fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
@@ -861,7 +863,7 @@ done
     /// (`LEAF_ADAPTER_ZIP`); without one there's nothing to test.
     #[test]
     fn installs_and_runs_a_released_zip() {
-        let Some(zip) = std::env::var_os("LEAF_ADAPTER_ZIP").map(PathBuf::from) else { return };
+        let Some(zip) = crate::series::env("ADAPTER_ZIP").map(PathBuf::from) else { return };
         assert!(is_package(&zip), "{} isn't seen as an adapter", zip.display());
         let dest = temp("released").join("adapters");
         let m = install_into(&zip, &dest).unwrap();

@@ -26,6 +26,7 @@ mod platform;
 // themselves; on a Mac this is built only for the tests.
 #[cfg(any(not(target_os = "macos"), test))]
 mod portable;
+mod series;
 mod settings;
 mod state;
 mod upscale;
@@ -55,6 +56,8 @@ static ALLOCATOR: platform::Allocator = platform::Allocator;
 
 /// A webtoon page that hasn't arrived yet.
 const PLACEHOLDER: u32 = 0x242427;
+/// The mark's pages, drawn quietly on the empty window.
+const MARK_PAGE: u32 = 0x34363c;
 const BROKEN: u32 = 0x3a2224;
 /// Wheel (or sideways swipe) distance, in pixels, that turns a page.
 const WHEEL_PAGE: f64 = 120.0;
@@ -87,10 +90,12 @@ pub enum Event {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("--version") => return println!("Leaf {}", env!("CARGO_PKG_VERSION")),
+        Some("--version") => return println!("{} {}", series::NAME, env!("CARGO_PKG_VERSION")),
         Some("--check") => std::process::exit(check(args.get(1).map(PathBuf::from))),
         _ => {}
     }
+    // Leaf's books, settings and adapters, the first time leaf9000 starts.
+    let adopted = series::env("CONFIG_DIR").is_none() && state::adopt(&state::dir(), &state::leaf_dir());
     log::init();
     log::catch_crashes();
     let event_loop = EventLoop::<Event>::with_user_event().build().expect("create the event loop");
@@ -101,8 +106,12 @@ fn main() {
     let config = proxy.clone();
     watch::config_folder(&state::dir(), move || drop(config.send_event(Event::Config)));
     let mut app = App::new(proxy);
+    if adopted {
+        log::push(crate::series::NAME, format!("brought Leaf's books, settings and adapters over from {}", state::leaf_dir().display()));
+        app.notice = Some(("Welcome to leaf9000: your books, settings and adapters came over from Leaf".into(), Instant::now() + NOTICE * 2));
+    }
     if let Err(e) = event_loop.run_app(&mut app) {
-        log::push("leaf", e.to_string());
+        log::push(crate::series::NAME, e.to_string());
     }
 }
 
@@ -324,8 +333,8 @@ impl App {
             turned: None,
         };
         if let Some(crash) = log::last_crash() {
-            log::push("leaf", format!("Leaf ran into a bug last time: {crash}"));
-            app.notice = Some(("Leaf closed unexpectedly last time; Help → Show Log has the details".into(), Instant::now() + NOTICE * 2));
+            log::push(crate::series::NAME, format!("leaf9000 ran into a bug last time: {crash}"));
+            app.notice = Some(("leaf9000 closed unexpectedly last time; Help → Show Log has the details".into(), Instant::now() + NOTICE * 2));
         }
         // Open the book before the window exists, so the page is decoded and
         // scaled while the system is still creating the window.
@@ -340,6 +349,14 @@ impl App {
     fn open_path(&mut self, path: PathBuf) -> bool {
         if adapters::is_package(&path) {
             self.install_adapter(&path);
+            return false;
+        }
+        // A document, video, sound or project goes to the 9000 app that
+        // makes it, unless an adapter here was installed to read it.
+        if let Some(s) = series::for_file(&path)
+            && self.host.reader_for(&path).is_none()
+        {
+            self.hand_off(s, Some(&path));
             return false;
         }
         // An adapter that says it opens this kind of file was installed on
@@ -381,7 +398,7 @@ impl App {
                 true
             }
             Err(e) => {
-                log::push("leaf", &e);
+                log::push(crate::series::NAME, &e);
                 self.problem = Some(e);
                 self.update_title();
                 self.redraw();
@@ -649,9 +666,21 @@ impl App {
     }
 
     /// Shows a short message in the title bar, and logs it.
+    /// Opens a sister app, with a file if given, and says how it went.
+    fn hand_off(&mut self, s: &series::Sibling, file: Option<&std::path::Path>) {
+        let configured = settings::get().apps.get(s.name).cloned();
+        match series::open(s, file, configured.as_deref()) {
+            Ok(()) => match file.and_then(|f| f.file_name()) {
+                Some(name) => self.say(format!("Opened {} in {}", name.to_string_lossy(), s.name)),
+                None => self.say(format!("Opened {}", s.name)),
+            },
+            Err(e) => self.say(e),
+        }
+    }
+
     fn say(&mut self, text: impl Into<String>) {
         let text = text.into();
-        log::push("leaf", &text);
+        log::push(crate::series::NAME, &text);
         // A message still showing stays, so one doesn't hide another.
         let text = match self.notice.take() {
             Some((old, until)) if until > Instant::now() => format!("{old}  ·  {text}"),
@@ -685,7 +714,10 @@ impl App {
         let proxy = self.proxy.clone();
         // The old menu goes first: on Windows, dropping one takes it off the window.
         self.menu = None;
-        let content = menu::Content { keys: &self.keys, adapters: &self.host.all, recent: &self.state.recent, view: self.view() };
+        let apps = settings::get().apps.clone();
+        let sisters: Vec<&'static str> =
+            series::SIBLINGS.iter().filter(|s| series::find(s, apps.get(s.name).map(String::as_str)).is_some()).map(|s| s.name).collect();
+        let content = menu::Content { keys: &self.keys, adapters: &self.host.all, recent: &self.state.recent, sisters: &sisters, view: self.view() };
         self.menu = Some(menu::MenuBar::install(&content, &window, move |id| drop(proxy.send_event(Event::Menu(id)))));
     }
 
@@ -736,8 +768,8 @@ impl App {
                 }
                 t
             }
-            None if cfg!(target_os = "macos") => "Leaf — drop a book here, or press ⌘O".into(),
-            None => "Leaf — drop a book here, or press Ctrl+O".into(),
+            None if cfg!(target_os = "macos") => "leaf9000 — drop a book here, or press ⌘O".into(),
+            None => "leaf9000 — drop a book here, or press Ctrl+O".into(),
         };
         if let Some(typed) = &self.typing {
             title = format!("Go to page: {typed}▏  (Return to go, Esc to cancel)  ·  {title}");
@@ -913,10 +945,10 @@ impl App {
         o.at.scroll = scroll;
         self.moved();
         if let Some(o) = &self.open
-            && std::env::var_os("LEAF_TIMING").is_some()
+            && crate::series::env("TIMING").is_some()
         {
             let ready = o.shown().iter().all(|&p| o.cache.contains_key(&(p, Part::Whole)));
-            eprintln!("leaf: turned to page {}, {}", page + 1, if ready { "ready" } else { "not ready yet" });
+            eprintln!("leaf9000: turned to page {}, {}", page + 1, if ready { "ready" } else { "not ready yet" });
             self.turned = Some(Instant::now());
         }
     }
@@ -1003,6 +1035,13 @@ impl App {
         if let Some((name, id)) = adapters::parse_command(command) {
             if let Err(e) = self.host.run_command(&name, &id) {
                 self.say(e);
+            }
+            return;
+        }
+        if let Some(name) = command.strip_prefix("app ") {
+            match series::sibling(name.trim()) {
+                Some(s) => self.hand_off(s, None),
+                None => self.say(format!("There's no 9000 app called {name}")),
             }
             return;
         }
@@ -1167,7 +1206,7 @@ impl App {
     fn debug_info(&self) -> String {
         let mb = |b: u64| format!("{:.0} MB", b as f64 / 1_048_576.0);
         let mut out = vec![
-            format!("Leaf {}", env!("CARGO_PKG_VERSION")),
+            format!("{} {}", series::NAME, env!("CARGO_PKG_VERSION")),
             format!("System: {} {}", std::env::consts::OS, std::env::consts::ARCH),
             format!("Config folder: {}", state::dir().display()),
         ];
@@ -1190,7 +1229,7 @@ impl App {
         let adapters: Vec<String> = self.host.all.iter().map(|a| format!("{} {}", a.manifest.name, a.manifest.version)).collect();
         out.push(format!("Adapters: {}", if adapters.is_empty() { "none".into() } else { adapters.join(", ") }));
         if let Some(u) = &self.upscaler {
-            out.push(format!("Upscaling: {} ({})", u.name, if u.usable() { "working" } else { "not working; Leaf scales" }));
+            out.push(format!("Upscaling: {} ({})", u.name, if u.usable() { "working" } else { "not working; leaf9000 scales" }));
         }
         let changed = |name: &str| {
             std::fs::read_to_string(state::dir().join(name))
@@ -1252,7 +1291,7 @@ impl App {
                 let title = params["title"].as_str().unwrap_or(&adapter);
                 Ok(json!(platform::confirm(title, params["message"].as_str().unwrap_or_default(), "Yes", "No")))
             }
-            other => Err(format!("Leaf doesn't know the method {other}")),
+            other => Err(format!("leaf9000 doesn't know the method {other}")),
         };
         match (id, result) {
             (Some(id), result) => self.host.reply(&adapter, id, result),
@@ -1412,6 +1451,12 @@ impl App {
             }
         }
 
+        // No book: the series mark, quietly, in the middle.
+        if open.is_none() {
+            let size = (w.min(h) as f64 * 0.22).min(140.0 * window.scale_factor());
+            series::draw_mark(&mut buf, w, h, w as f64 / 2.0, h as f64 / 2.0, size, background, MARK_PAGE, accent);
+        }
+
         // While something is dragged over the window: an outline, so you can
         // see it'll be taken.
         if hovering {
@@ -1471,10 +1516,10 @@ impl App {
         }
         if o.wanted.get(&done.piece) == Some(&done.target) {
             let shown = o.mode() == Mode::Webtoon || o.shown().contains(&page);
-            if shown && std::env::var_os("LEAF_TIMING").is_some() {
+            if shown && crate::series::env("TIMING").is_some() {
                 match self.turned {
-                    Some(t) => eprintln!("leaf: page {} on screen {:?} after the turn", page + 1, t.elapsed()),
-                    None => eprintln!("leaf: page {} on screen {:?} after start", page + 1, self.started.elapsed()),
+                    Some(t) => eprintln!("leaf9000: page {} on screen {:?} after the turn", page + 1, t.elapsed()),
+                    None => eprintln!("leaf9000: page {} on screen {:?} after start", page + 1, self.started.elapsed()),
                 }
             }
             if done.image.is_ok() {
@@ -1590,14 +1635,14 @@ impl ApplicationHandler<Event> for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("Leaf").with_inner_size(LogicalSize::<f64>::from(self.window_size()));
+        let attrs = Window::default_attributes().with_title(series::NAME).with_inner_size(LogicalSize::<f64>::from(self.window_size()));
         // On Linux the desktop matches the window to leaf.desktop (its menu
         // entry and icon) by this name.
         #[cfg(target_os = "linux")]
         let attrs = {
             use winit::platform::{wayland::WindowAttributesExtWayland, x11::WindowAttributesExtX11};
-            let attrs = WindowAttributesExtWayland::with_name(attrs, "leaf", "leaf");
-            WindowAttributesExtX11::with_name(attrs, "leaf", "leaf")
+            let attrs = WindowAttributesExtWayland::with_name(attrs, "leaf9000", "leaf9000");
+            WindowAttributesExtX11::with_name(attrs, "leaf9000", "leaf9000")
         };
         let window = Arc::new(event_loop.create_window(attrs).expect("create the window"));
         // X11 and Windows show the window's own icon in the taskbar and the

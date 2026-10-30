@@ -1,8 +1,8 @@
 [package]
-name = "leaf"
-version = "0.0.6"
+name = "leaf9000"
+version = "0.0.7"
 edition = "2024"
-description = "A bare, instant comic and manga reader that reopens where you left off."
+description = "The 9000 series' reader: a bare, instant comic and manga reader that reopens where you left off."
 license = "MIT"
 
 [dependencies]
@@ -27,10 +27,12 @@ libc = "0.2"
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 muda = { version = "0.21.2", default-features = false }
 
-# macOS: books opened from Finder (Apple Events), and documents imported by AppKit.
+# macOS: books opened from Finder (Apple Events), documents imported by
+# AppKit, and finding the sister apps (NSWorkspace).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace"] }
 
 # Windows and Linux: the formats macOS reads for Leaf, read by Leaf itself.
 # (The Mac build uses macOS's own; its tests build these too, so they're

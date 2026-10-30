@@ -1,4 +1,4 @@
-//! What Leaf remembers between runs: the last book, and per book the page,
+//! What leaf9000 remembers between runs: the last book, and per book the page,
 //! reading direction and fit. Stored as readable JSON in the config folder.
 
 use serde::{Deserialize, Serialize};
@@ -89,22 +89,54 @@ fn home() -> PathBuf {
         .unwrap_or_default()
 }
 
-/// The one folder that holds everything Leaf keeps. Copy it to move your
-/// setup. `LEAF_CONFIG_DIR` points Leaf at another one (for testing, or a
-/// second setup).
+/// The one folder that holds everything leaf9000 keeps. Copy it to move
+/// your setup. `LEAF9000_CONFIG_DIR` (or Leaf's `LEAF_CONFIG_DIR`) points it
+/// at another one, for testing or a second setup.
 pub fn dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("LEAF_CONFIG_DIR").filter(|d| !d.is_empty()) {
-        return PathBuf::from(dir);
+    match crate::series::env("CONFIG_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => named(crate::series::NAME),
     }
+}
+
+/// Where Leaf, before it joined the 9000 series, kept everything.
+pub fn leaf_dir() -> PathBuf {
+    named(if cfg!(any(target_os = "macos", windows)) { "Leaf" } else { "leaf" })
+}
+
+fn named(name: &str) -> PathBuf {
     #[cfg(target_os = "macos")]
-    return home().join("Library/Application Support/Leaf");
+    return home().join("Library/Application Support").join(name);
     #[cfg(windows)]
-    return std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(home).join("Leaf");
+    return std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(home).join(name);
     #[cfg(all(unix, not(target_os = "macos")))]
     return std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|d| !d.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join(".config"))
-        .join("leaf");
+        .join(name);
+}
+
+/// On leaf9000's first start, copies Leaf's folder (where you were in every
+/// book, settings, keys, adapters and their approvals) into its own, so
+/// everything carries over. Leaf's folder is left as it was. Returns true
+/// when it copied.
+pub fn adopt(new: &std::path::Path, old: &std::path::Path) -> bool {
+    if new.exists() || !old.is_dir() {
+        return false;
+    }
+    // Copied beside the target, then renamed into place, so a copy cut off
+    // halfway is never taken for a finished one.
+    let partial = new.with_extension("partial");
+    let _ = fs::remove_dir_all(&partial);
+    match crate::adapters::copy_dir(old, &partial).and_then(|()| fs::rename(&partial, new)) {
+        Ok(()) => true,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&partial);
+            eprintln!("leaf9000: couldn't copy Leaf's settings from {}: {e}", old.display());
+            false
+        }
+    }
 }
 
 /// Loads the state. A file that can't be read is set aside, not lost, and
@@ -115,7 +147,7 @@ pub fn load() -> State {
     match serde_json::from_str(&text) {
         Ok(state) => state,
         Err(e) => {
-            eprintln!("leaf: {}: {e}; starting fresh", path.display());
+            eprintln!("leaf9000: {}: {e}; starting fresh", path.display());
             let _ = fs::rename(&path, path.with_extension("json.bad"));
             State::default()
         }
@@ -147,5 +179,29 @@ mod tests {
         assert_eq!((b.page, b.rtl, b.mode, b.chosen, b.spreads), (7, true, None, false, None));
         let prototype = r#"{"last":"/b.cbz","books":{"/b.cbz":{"page":3}}}"#;
         assert_eq!(serde_json::from_str::<State>(prototype).unwrap().books["/b.cbz"].page, 3);
+    }
+}
+
+#[cfg(test)]
+mod adopt_tests {
+    use super::*;
+
+    #[test]
+    fn leafs_folder_comes_along_once() {
+        let root = std::env::temp_dir().join(format!("leaf9000-adopt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (old, new) = (root.join("Leaf"), root.join("leaf9000"));
+        fs::create_dir_all(old.join("adapters/upscale-4k")).unwrap();
+        fs::write(old.join("state.json"), "{}").unwrap();
+        fs::write(old.join("adapters/upscale-4k/adapter.toml"), "x").unwrap();
+        assert!(adopt(&new, &old));
+        assert!(new.join("state.json").exists() && new.join("adapters/upscale-4k/adapter.toml").exists());
+        assert!(old.join("state.json").exists(), "Leaf's folder stays");
+        // Never again once leaf9000 has its own.
+        fs::write(old.join("keys.toml"), "x").unwrap();
+        assert!(!adopt(&new, &old));
+        assert!(!new.join("keys.toml").exists());
+        assert!(!adopt(&root.join("other"), &root.join("missing")));
+        let _ = fs::remove_dir_all(&root);
     }
 }

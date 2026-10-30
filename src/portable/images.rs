@@ -14,7 +14,7 @@ fn checked(w: u32, h: u32) -> Result<(), String> {
         return Err("an empty image".into());
     }
     if w as u64 * h as u64 > MAX_PIXELS {
-        return Err(format!("a {w}×{h} image is bigger than Leaf will open"));
+        return Err(format!("a {w}×{h} image is bigger than leaf9000 will open"));
     }
     Ok(())
 }
@@ -112,11 +112,11 @@ fn icns(bytes: &[u8]) -> Result<RgbImage, String> {
 /// usual way: demosaiced, white-balanced, in sRGB.
 fn raw(bytes: &[u8]) -> Result<RgbImage, String> {
     let source = rawler::rawsource::RawSource::new_from_slice(bytes);
-    let decoder = rawler::get_decoder(&source).map_err(|_| "not an image Leaf can read".to_string())?;
+    let decoder = rawler::get_decoder(&source).map_err(|_| "not an image leaf9000 can read".to_string())?;
     let image = decoder.raw_image(&source, &rawler::decoders::RawDecodeParams::default(), false).map_err(|e| e.to_string())?;
     checked(image.width as u32, image.height as u32)?;
     let developed = rawler::imgop::develop::RawDevelop::default().develop_intermediate(&image).map_err(|e| e.to_string())?;
-    developed.to_dynamic_image().map(|i| i.into_rgb8()).ok_or_else(|| "a RAW Leaf couldn't develop".into())
+    developed.to_dynamic_image().map(|i| i.into_rgb8()).ok_or_else(|| "a RAW leaf9000 couldn't develop".into())
 }
 
 #[cfg(target_os = "linux")]

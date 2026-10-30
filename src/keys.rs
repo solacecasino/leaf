@@ -54,7 +54,7 @@ pub const COMMANDS: &[&str] = &[
     "edit-keys", "edit-settings", "help", "none",
 ];
 
-const EXAMPLE: &str = r#"# Leaf key bindings. Lines here add to or replace the built-in ones.
+const EXAMPLE: &str = r#"# leaf9000 key bindings. Lines here add to or replace the built-in ones.
 # Saved changes apply straight away.
 #
 # Keys are written like "cmd+shift+o": cmd means Cmd on macOS and Ctrl
@@ -81,6 +81,8 @@ const EXAMPLE: &str = r#"# Leaf key bindings. Lines here add to or replace the b
 #   open-config-folder, show-adapters-folder, reload-adapters, show-log,
 #   copy-debug-info, edit-keys, edit-settings, help
 #   adapter "Name" id     an adapter's command
+#   app grace9000         open another 9000 app: text9000, splice9000,
+#                         wave9000 or grace9000
 #   none                  unbind a built-in key
 #
 # Examples:
@@ -88,6 +90,7 @@ const EXAMPLE: &str = r#"# Leaf key bindings. Lines here add to or replace the b
 # "a" = "page-left"
 # "h" = "none"
 # "cmd+k" = 'adapter "Some Adapter" its-command'
+# "cmd+shift+g" = "app grace9000"
 "#;
 
 pub struct Keys {
@@ -117,7 +120,8 @@ impl Keys {
         match toml::from_str::<HashMap<String, String>>(text) {
             Ok(user) => {
                 for (key, cmd) in user {
-                    if COMMANDS.contains(&cmd.as_str()) || crate::adapters::parse_command(&cmd).is_some() {
+                    let app = cmd.strip_prefix("app ").is_some_and(|n| crate::series::sibling(n.trim()).is_some());
+                    if COMMANDS.contains(&cmd.as_str()) || app || crate::adapters::parse_command(&cmd).is_some() {
                         map.insert(key.to_ascii_lowercase(), cmd);
                     } else {
                         problem = Some(format!("keys.toml: unknown command \"{cmd}\""));

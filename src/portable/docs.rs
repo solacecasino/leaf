@@ -20,7 +20,7 @@ pub fn text(path: &Path) -> Result<String, String> {
         } else if let Some(xml) = part(&mut zip, "content.xml") {
             odf_xml(&xml)
         } else {
-            return Err("not a document Leaf knows".into());
+            return Err("not a document leaf9000 knows".into());
         }
     } else if bytes.starts_with(b"{\\rtf") {
         rtf(&String::from_utf8_lossy(&bytes))
@@ -29,7 +29,7 @@ pub fn text(path: &Path) -> Result<String, String> {
     } else if ["html", "htm", "xhtml"].contains(&ext.as_str()) {
         crate::epub::plain_text(&String::from_utf8_lossy(&bytes)).replace('\n', "\n\n")
     } else {
-        return Err("not a document Leaf knows".into());
+        return Err("not a document leaf9000 knows".into());
     };
     if text.trim().is_empty() { Err("the book is empty".into()) } else { Ok(text) }
 }
@@ -232,7 +232,7 @@ fn cp1252(v: u8) -> char {
 /// The text of an old Word file (.doc, Word 97 and later): the
 /// WordDocument stream's pieces, as its piece table lists them.
 fn doc(bytes: &[u8]) -> Result<String, String> {
-    let bad = || "a Word file Leaf couldn't read".to_string();
+    let bad = || "a Word file leaf9000 couldn't read".to_string();
     let file = Compound::new(bytes).ok_or_else(bad)?;
     let word = file.stream("WordDocument").ok_or_else(bad)?;
     let u16_at = |b: &[u8], i: usize| b.get(i..i + 2).map(|s| u16::from_le_bytes([s[0], s[1]]));

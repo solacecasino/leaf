@@ -258,7 +258,7 @@ impl Book {
             Sniff::Rtf | Sniff::Ole => Ok((Self::document(path)?, None)),
             Sniff::Unknown if has_ext(path, DOCUMENT_EXTS) => Ok((Self::document(path)?, None)),
             Sniff::Unknown if has_ext(path, TEXT_EXTS) || looks_like_text(path) => Ok((Self::plain(path)?, None)),
-            Sniff::Unknown => Err(format!("{} isn't a book Leaf can read", stem(path))),
+            Sniff::Unknown => Err(format!("{} isn't a book leaf9000 can read", stem(path))),
         }
     }
 

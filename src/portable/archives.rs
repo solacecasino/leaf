@@ -29,7 +29,7 @@ enum Kind {
 }
 
 fn too_big(size: u64) -> Result<(), String> {
-    if size > MAX_PAGE { Err(format!("a page of {} MB is more than Leaf will unpack", size / 1_048_576)) } else { Ok(()) }
+    if size > MAX_PAGE { Err(format!("a page of {} MB is more than leaf9000 will unpack", size / 1_048_576)) } else { Ok(()) }
 }
 
 fn is_comic_info(name: &str) -> bool {
@@ -150,8 +150,8 @@ fn tar_listing(path: &Path, is_page: &dyn Fn(&str) -> bool) -> Result<Listing, S
     let mut pages = Vec::new();
     let mut entries = Vec::new();
     let mut comic_info = None;
-    for entry in archive.entries().map_err(|_| "not an archive Leaf can read".to_string())? {
-        let mut entry = entry.map_err(|_| "not an archive Leaf can read".to_string())?;
+    for entry in archive.entries().map_err(|_| "not an archive leaf9000 can read".to_string())? {
+        let mut entry = entry.map_err(|_| "not an archive leaf9000 can read".to_string())?;
         if !entry.header().entry_type().is_file() {
             continue;
         }
@@ -172,7 +172,7 @@ fn tar_listing(path: &Path, is_page: &dyn Fn(&str) -> bool) -> Result<Listing, S
         let mut head = [0u8; 512];
         let n = File::open(path).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
         if n < 512 || &head[257..262] != b"ustar" {
-            return Err("not an archive Leaf can read".into());
+            return Err("not an archive leaf9000 can read".into());
         }
     }
     Ok(Listing { book: Book { path: path.to_path_buf(), kind: Kind::Tar(entries) }, pages, comic_info })
@@ -234,7 +234,7 @@ mod tests {
         let out = dir.join("book.cbr");
         let made = std::process::Command::new("rar").args(["a", "-r", "-idq"]).arg(&out).arg(".").current_dir(dir.join("in")).status();
         if !made.is_ok_and(|s| s.success()) {
-            assert!(std::env::var_os("LEAF_REQUIRE_RAR").is_none(), "rar isn't installed");
+            assert!(crate::series::env("REQUIRE_RAR").is_none(), "rar isn't installed");
             eprintln!("skipped: no rar");
             return;
         }

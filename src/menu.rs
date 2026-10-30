@@ -1,5 +1,5 @@
-//! The menu bar: Leaf, File, View, Go, Adapters (only when some are
-//! installed), Window (macOS) and Help, at the top of the screen on macOS
+//! The menu bar: leaf9000, File, View, Go, Adapters (only when some are
+//! installed), 9000 (the sister apps), Window (macOS) and Help, at the top of the screen on macOS
 //! and of the window on Windows. It's built from the key bindings, so it
 //! shows the user's own shortcuts, and every item is a named command the app
 //! runs exactly like a key press. It's rebuilt when the book or the adapters
@@ -17,6 +17,8 @@ pub struct Content<'a> {
     pub keys: &'a Keys,
     pub adapters: &'a [Adapter],
     pub recent: &'a [PathBuf],
+    /// The other 9000 apps that are installed.
+    pub sisters: &'a [&'static str],
     pub view: View,
 }
 
@@ -66,8 +68,8 @@ fn label(command: &str) -> &'static str {
         "reload-adapters" => "Reload Adapters",
         "show-log" => "Show Log",
         "copy-debug-info" => "Copy Debug Info",
-        "help" => "Leaf Help",
-        "quit" => "Quit Leaf",
+        "help" => "leaf9000 Help",
+        "quit" => "Quit leaf9000",
         _ => "",
     }
 }
@@ -151,7 +153,7 @@ mod bar {
             let menu = Menu::new();
             let sep = PredefinedMenuItem::separator;
 
-            let app = Submenu::new("Leaf", true);
+            let app = Submenu::new("leaf9000", true);
             let config = [
                 b.builtin("open-config-folder", true),
                 b.builtin("edit-keys", true),
@@ -161,7 +163,7 @@ mod bar {
             ];
             #[cfg(target_os = "macos")]
             {
-                app.append_items(&[&PredefinedMenuItem::about(Some("About Leaf"), Some(about())), &sep()]).expect("menu builds");
+                app.append_items(&[&PredefinedMenuItem::about(Some("About leaf9000"), Some(about())), &sep()]).expect("menu builds");
                 for item in &config {
                     app.append(item).expect("menu builds");
                 }
@@ -247,6 +249,16 @@ mod bar {
                 menu.append(&adapters).expect("menu builds");
             }
 
+            // The sister apps that are installed, and only those.
+            let series = Submenu::new("9000", true);
+            for name in content.sisters {
+                series.append(&b.item(&format!("app {name}"), name, true)).expect("menu builds");
+            }
+            if content.sisters.is_empty() {
+                series.append(&MenuItem::new("No other 9000 apps installed", false, None)).expect("menu builds");
+            }
+            menu.append(&series).expect("menu builds");
+
             let help = Submenu::new("Help", true);
             help.append_items(&[&b.builtin("help", true), &b.builtin("show-log", true), &b.builtin("copy-debug-info", true)]).expect("menu builds");
 
@@ -265,13 +277,13 @@ mod bar {
             #[cfg(windows)]
             {
                 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-                help.append_items(&[&PredefinedMenuItem::separator(), &PredefinedMenuItem::about(Some("About Leaf"), Some(about()))])
+                help.append_items(&[&PredefinedMenuItem::separator(), &PredefinedMenuItem::about(Some("About leaf9000"), Some(about()))])
                     .expect("menu builds");
                 menu.append(&help).expect("menu builds");
                 if let Ok(RawWindowHandle::Win32(h)) = window.window_handle().map(|h| h.as_raw()) {
                     // SAFETY: the window's own handle, which outlives the menu.
                     if let Err(e) = unsafe { menu.init_for_hwnd(h.hwnd.get()) } {
-                        crate::log::push("leaf", format!("couldn't add the menu bar: {e}"));
+                        crate::log::push(crate::series::NAME, format!("couldn't add the menu bar: {e}"));
                     }
                 }
             }
@@ -324,7 +336,7 @@ mod bar {
     fn about() -> muda::AboutMetadata {
         let icon = image::load_from_memory(include_bytes!("../assets/icon-256.png")).ok().map(|i| i.into_rgba8());
         AboutMetadataBuilder::new()
-            .name(Some("Leaf"))
+            .name(Some("leaf9000"))
             .version(Some(env!("CARGO_PKG_VERSION")))
             .comments(Some("A bare comic and manga reader that opens where you left off."))
             .copyright(Some("© 2026 Vishal Mohan · MIT License"))

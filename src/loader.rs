@@ -238,8 +238,8 @@ fn work(shared: Shared, deliver: impl Fn(Loaded) -> bool) {
             }
             Err(e) => (Err(e), None),
         };
-        if std::env::var_os("LEAF_TIMING").is_some() {
-            eprintln!("leaf: page {} {:?} decoded and scaled in {:?}", page + 1, piece.1, started.elapsed());
+        if crate::series::env("TIMING").is_some() {
+            eprintln!("leaf9000: page {} {:?} decoded and scaled in {:?}", page + 1, piece.1, started.elapsed());
         }
         if !deliver(Loaded::Page(Done { book: id, piece, target, image, info })) {
             return;

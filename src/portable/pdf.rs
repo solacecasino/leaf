@@ -13,7 +13,7 @@ static PDFIUM: OnceLock<Result<Pdfium, String>> = OnceLock::new();
 /// to Leaf, in a `lib` folder beside it, then wherever the system keeps
 /// libraries.
 fn candidates() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = std::env::var_os("LEAF_PDFIUM").map(PathBuf::from).into_iter().collect();
+    let mut out: Vec<PathBuf> = crate::series::env("PDFIUM").map(PathBuf::from).into_iter().collect();
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
         out.push(Pdfium::pdfium_platform_library_name_at_path(&dir));
         out.push(Pdfium::pdfium_platform_library_name_at_path(&dir.join("lib")));
@@ -31,7 +31,7 @@ fn pdfium() -> Result<&'static Pdfium, String> {
                     return Ok(Pdfium::new(bindings));
                 }
             }
-            Err("PDFs need pdfium, which comes with Leaf: keep the pdfium library next to the Leaf program".into())
+            Err("PDFs need pdfium, which comes with leaf9000: keep the pdfium library next to the leaf9000 program".into())
         })
         .as_ref()
         .map_err(Clone::clone)
@@ -51,7 +51,7 @@ impl Pdf {
     pub fn open(path: &Path) -> Result<Pdf, String> {
         let doc = pdfium()?.load_pdf_from_file(path, None).map_err(|e| match e {
             PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError) => "this PDF is locked with a password".to_string(),
-            e => format!("not a PDF Leaf can read ({e})"),
+            e => format!("not a PDF leaf9000 can read ({e})"),
         })?;
         let pages = doc.pages().len() as usize;
         Ok(Pdf { doc: Mutex::new(doc), pages })
@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn draws_pdf_pages_with_pdfium() {
         let Ok(_) = pdfium() else {
-            assert!(std::env::var_os("LEAF_REQUIRE_PDFIUM").is_none(), "pdfium isn't there");
+            assert!(crate::series::env("REQUIRE_PDFIUM").is_none(), "pdfium isn't there");
             eprintln!("skipped: no pdfium");
             return;
         };
