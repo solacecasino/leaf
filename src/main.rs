@@ -88,6 +88,9 @@ pub enum Event {
 }
 
 fn main() {
+    core9000::init(&series::APP);
+    // The core's lines (the sisters') go in leaf9000's log.
+    core9000::log::set_sink(|_, text| log::push(series::NAME, text));
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--version") => return println!("{} {}", series::NAME, env!("CARGO_PKG_VERSION")),
@@ -716,7 +719,7 @@ impl App {
         self.menu = None;
         let apps = settings::get().apps.clone();
         let sisters: Vec<&'static str> =
-            series::SIBLINGS.iter().filter(|s| series::find(s, apps.get(s.name).map(String::as_str)).is_some()).map(|s| s.name).collect();
+            series::siblings().filter(|s| series::find(s, apps.get(s.name).map(String::as_str)).is_some()).map(|s| s.name).collect();
         let content = menu::Content { keys: &self.keys, adapters: &self.host.all, recent: &self.state.recent, sisters: &sisters, view: self.view() };
         self.menu = Some(menu::MenuBar::install(&content, &window, move |id| drop(proxy.send_event(Event::Menu(id)))));
     }
@@ -1251,6 +1254,13 @@ impl App {
     /// A message from an adapter. Requests are answered; a refused or
     /// unknown one gets an error back instead of being ignored.
     fn adapter_call(&mut self, adapter: String, id: Option<Value>, method: String, params: Value) {
+        // What every 9000 sister answers the same way (`log`, `sisters.*`).
+        if let Some(result) = core9000::family::call(&adapter, &method, &params) {
+            if let Some(id) = id {
+                self.host.reply(&adapter, id, result);
+            }
+            return;
+        }
         let allowed = |permission: &str| {
             if self.host.has(&adapter, permission) {
                 Ok(())

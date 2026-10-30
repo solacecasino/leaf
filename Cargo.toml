@@ -6,6 +6,9 @@ description = "The 9000 series' reader: a bare, instant comic and manga reader t
 license = "MIT"
 
 [dependencies]
+# The 9000 series' shared core: the family protocol and the sisters (not
+# its window: leaf9000 draws its own).
+core9000 = { git = "https://github.com/solacecasino/core9000", tag = "v0.1.1", default-features = false }
 # The window and input (winit); the pixels are drawn by the CPU and handed to
 # the window by softbuffer, so no graphics driver is loaded.
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }

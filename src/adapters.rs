@@ -51,6 +51,9 @@ pub struct Manifest {
     pub run: Vec<String>,
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// The 9000 sisters it works in; left out, any that installs it.
+    #[serde(default)]
+    pub apps: Vec<String>,
     #[serde(default)]
     pub start: Start,
     /// Events to receive while running: "opened", "page".
@@ -287,7 +290,14 @@ impl Host {
 
         link.notify(
             "initialize",
-            json!({ "leaf": env!("CARGO_PKG_VERSION"), "leaf9000": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL, "permissions": manifest.permissions }),
+            // The 9000 series' family fields (app, version, "leaf9000",
+            // protocol, family, permissions, sisters), and "leaf" for
+            // adapters written for Leaf.
+            {
+                let mut p = core9000::family::initialize(&manifest.permissions, &serde_json::Map::new());
+                p["leaf"] = json!(env!("CARGO_PKG_VERSION"));
+                p
+            },
         );
         crate::log::push(crate::series::NAME, format!("started {} {}", manifest.name, manifest.version));
         self.all[i].running = Some(Running { child, link: link.clone(), generation });
@@ -486,6 +496,10 @@ fn load_manifest(dir: &Path) -> Result<Manifest, String> {
     let manifest: Manifest = toml::from_str(&text).map_err(|e| format!("{}: {}", path.display(), e.message()))?;
     if manifest.run.is_empty() {
         return Err(format!("{}: `run` is empty", path.display()));
+    }
+    // An adapter made for other sisters says so (`apps`), and isn't run here.
+    if !manifest.apps.is_empty() && !manifest.apps.iter().any(|a| a.eq_ignore_ascii_case(crate::series::NAME) || a.eq_ignore_ascii_case("leaf")) {
+        return Err(format!("{} is an adapter for {}, not leaf9000.", manifest.name, manifest.apps.join(" and ")));
     }
     for p in &manifest.permissions {
         if !KNOWN_PERMISSIONS.contains(&p.as_str()) {
@@ -900,6 +914,7 @@ done
             homepage: String::new(),
             run: vec![run.into()],
             permissions: Vec::new(),
+            apps: Vec::new(),
             start: Start::Command,
             events: Vec::new(),
             commands: Vec::new(),

@@ -76,192 +76,50 @@ pub fn draw_mark(buf: &mut [u32], w: i64, h: i64, cx: f64, cy: f64, size: f64, b
     }
 }
 
-pub struct Sibling {
-    pub name: &'static str,
-    /// What it does, for messages ("the video editor").
-    pub kind: &'static str,
-    /// How macOS finds it.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub bundle_id: &'static str,
-    /// Its own files, then what else it opens that leaf9000 doesn't.
-    pub extensions: &'static [&'static str],
-    pub repo: &'static str,
-}
+/// Who leaf9000 is, for core9000: the 9000 series' shared adapter host
+/// pieces, family protocol and sisters.
+pub static APP: core9000::App = core9000::App {
+    name: NAME,
+    version: env!("CARGO_PKG_VERSION"),
+    env_prefix: "LEAF9000",
+    legacy_env_prefix: "LEAF",
+    protocol: crate::adapters::PROTOCOL,
+    permissions: &[
+        (crate::adapters::BOOK_READ, "see which book is open and the page you're on"),
+        (crate::adapters::BOOK_CONTROL, "open books and turn pages"),
+        (crate::adapters::BOOK_PAGES, "see the pages you read (to change how they look)"),
+    ],
+    events_permission: crate::adapters::BOOK_READ,
+};
 
-pub const SIBLINGS: [Sibling; 4] = [
-    Sibling {
-        name: "text9000",
-        kind: "writing app",
-        bundle_id: "app.text9000.editor",
-        extensions: &["t9k", "folio"],
-        repo: "https://github.com/solacecasino/text9000",
-    },
-    Sibling {
-        name: "splice9000",
-        kind: "video editor",
-        bundle_id: "app.splice9000.editor",
-        extensions: &[
-            "splice", "mp4", "mov", "m4v", "mkv", "webm", "avi", "mpg", "mpeg", "mts", "m2ts", "wmv", "flv", "3gp",
-        ],
-        repo: "https://github.com/solacecasino/splice9000",
-    },
-    Sibling {
-        name: "wave9000",
-        kind: "audio workstation",
-        bundle_id: "app.wave9000.workstation",
-        extensions: &[
-            "wave", "wav", "mp3", "flac", "aiff", "aif", "m4a", "aac", "ogg", "oga", "opus", "wma", "caf",
-        ],
-        repo: "https://github.com/solacecasino/wave9000",
-    },
-    // Photos themselves are pictures leaf9000 shows; a grace9000 edit is
-    // grace9000's.
-    Sibling {
-        name: "grace9000",
-        kind: "photo editor",
-        bundle_id: "app.grace9000.editor",
-        extensions: &["grace"],
-        repo: "https://github.com/solacecasino/grace9000",
-    },
-];
+/// A sister app (from core9000, shared by the whole series).
+pub type Sibling = core9000::sisters::Sister;
+
+/// The four sisters leaf9000 hands work to.
+pub fn siblings() -> impl Iterator<Item = &'static Sibling> {
+    core9000::sisters::others()
+}
 
 pub fn sibling(name: &str) -> Option<&'static Sibling> {
-    SIBLINGS.iter().find(|s| s.name == name)
+    siblings().find(|s| s.name.eq_ignore_ascii_case(name))
 }
 
-/// The sister app that opens this file, by its extension.
+/// The sister app a file goes to: one owning it (projects, documents), or
+/// video and sound. leaf9000 reads photos and text itself.
 pub fn for_file(path: &Path) -> Option<&'static Sibling> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    SIBLINGS.iter().find(|s| s.extensions.contains(&ext.as_str()))
+    use core9000::sisters::{SOUND, VIDEO, is};
+    core9000::sisters::for_file(path).filter(|s| is(path, s.owns) || is(path, VIDEO) || is(path, SOUND))
 }
 
 /// Where a sister app is installed, if it is. `configured` is the path
 /// from settings.toml's `[apps]`, which wins.
 pub fn find(s: &Sibling, configured: Option<&str>) -> Option<PathBuf> {
-    if let Some(path) = configured.map(PathBuf::from).filter(|p| p.exists()) {
-        return Some(path);
-    }
-    os::find(s)
+    s.find(configured.map(Path::new))
 }
 
 /// Opens a sister app, with a file if given. Returns why it couldn't.
 pub fn open(s: &Sibling, file: Option<&Path>, configured: Option<&str>) -> Result<(), String> {
-    let Some(app) = find(s, configured) else {
-        return Err(format!("{} isn't installed. It's the {} in the 9000 series: {}/releases/latest", s.name, s.kind, s.repo));
-    };
-    os::launch(&app, file).map_err(|e| format!("Couldn't open {}: {e}", s.name))
-}
-
-#[cfg(target_os = "macos")]
-mod os {
-    use super::Sibling;
-    use objc2_app_kit::NSWorkspace;
-    use objc2_foundation::NSString;
-    use std::path::{Path, PathBuf};
-
-    pub fn find(s: &Sibling) -> Option<PathBuf> {
-        let url = NSWorkspace::sharedWorkspace().URLForApplicationWithBundleIdentifier(&NSString::from_str(s.bundle_id))?;
-        url.path().map(|p| PathBuf::from(p.to_string()))
-    }
-
-    pub fn launch(app: &Path, file: Option<&Path>) -> std::io::Result<()> {
-        let mut cmd = std::process::Command::new("/usr/bin/open");
-        cmd.arg("-a").arg(app);
-        if let Some(file) = file {
-            cmd.arg(file);
-        }
-        let status = cmd.status()?;
-        if status.success() { Ok(()) } else { Err(std::io::Error::other(format!("open exited with {status}"))) }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-mod os {
-    use super::Sibling;
-    use std::path::{Path, PathBuf};
-
-    fn exe_name(s: &Sibling) -> String {
-        if cfg!(windows) { format!("{}.exe", s.name) } else { s.name.to_owned() }
-    }
-
-    pub fn find(s: &Sibling) -> Option<PathBuf> {
-        let exe = exe_name(s);
-        let mut candidates: Vec<PathBuf> = Vec::new();
-        if let Some(path) = std::env::var_os("PATH") {
-            candidates.extend(std::env::split_paths(&path).map(|dir| dir.join(&exe)));
-        }
-        // The downloads are folders you unpack anywhere: look beside
-        // leaf9000's own folder (Downloads/splice9000-0.0.8-windows-x64/...).
-        if let Some(parent) = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.parent()?.to_path_buf()))
-            && let Ok(entries) = std::fs::read_dir(&parent)
-        {
-            let mut beside: Vec<PathBuf> = entries
-                .flatten()
-                .filter(|e| e.file_name().to_string_lossy().to_ascii_lowercase().starts_with(s.name))
-                .map(|e| e.path().join(&exe))
-                .collect();
-            // The newest version sorts last.
-            beside.sort();
-            candidates.extend(beside.into_iter().rev());
-        }
-        if cfg!(windows) {
-            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-                candidates.push(PathBuf::from(local).join("Programs").join(s.name).join(&exe));
-            }
-        } else {
-            candidates.extend(desktop_entry(s));
-        }
-        candidates.into_iter().find(|p| p.is_file())
-    }
-
-    /// The program a sister app's menu entry starts (its install.sh writes
-    /// one with the full path).
-    #[cfg_attr(windows, allow(dead_code))]
-    fn desktop_entry(s: &Sibling) -> Vec<PathBuf> {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        let data = std::env::var_os("XDG_DATA_HOME")
-            .filter(|v| !v.is_empty())
-            .map_or_else(|| home.join(".local/share"), PathBuf::from);
-        [data, PathBuf::from("/usr/local/share"), PathBuf::from("/usr/share")]
-            .iter()
-            .filter_map(|dir| std::fs::read_to_string(dir.join("applications").join(format!("{}.desktop", s.name))).ok())
-            .filter_map(|entry| {
-                let exec = entry.lines().find_map(|l| l.strip_prefix("Exec="))?;
-                Some(PathBuf::from(super::exec_program(exec)))
-            })
-            .collect()
-    }
-
-    pub fn launch(app: &Path, file: Option<&Path>) -> std::io::Result<()> {
-        let mut cmd = std::process::Command::new(app);
-        if let Some(file) = file {
-            cmd.arg(file);
-        }
-        cmd.spawn().map(drop)
-    }
-}
-
-/// The program in a desktop entry's Exec= line: the first word, or the
-/// quoted path. Desktop files escape twice (the file's strings, then the
-/// quoted argument), so `\\$` in the file is `$`.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
-fn exec_program(exec: &str) -> String {
-    let unescaped = exec.trim().replace("\\\\", "\\");
-    let exec = unescaped.as_str();
-    if let Some(quoted) = exec.strip_prefix('"') {
-        let mut out = String::new();
-        let mut chars = quoted.chars();
-        while let Some(c) = chars.next() {
-            match c {
-                '"' => break,
-                '\\' => out.extend(chars.next()),
-                c => out.push(c),
-            }
-        }
-        out
-    } else {
-        exec.split_whitespace().next().unwrap_or_default().to_owned()
-    }
+    s.open(file.as_slice(), configured.map(Path::new))
 }
 
 #[cfg(test)]
@@ -270,6 +128,7 @@ mod tests {
 
     #[test]
     fn files_go_to_the_right_sister() {
+        core9000::init(&APP);
         let name = |p: &str| for_file(Path::new(p)).map(|s| s.name);
         assert_eq!(name("/notes/script.t9k"), Some("text9000"));
         assert_eq!(name("old.FOLIO"), Some("text9000"));
@@ -294,13 +153,6 @@ mod tests {
         assert_eq!(at(80, 95), GOLD, "the bottom of the right page");
         assert_eq!(at(60, 60), 0, "the gutter");
         assert_eq!(at(2, 2), 0, "outside");
-    }
-
-    #[test]
-    fn desktop_entry_programs() {
-        assert_eq!(exec_program(r#""/home/me/apps/splice 9000/splice9000""#), "/home/me/apps/splice 9000/splice9000");
-        assert_eq!(exec_program(r#""/a/\\$x/wave9000" %f"#), "/a/$x/wave9000");
-        assert_eq!(exec_program("grace9000 %F"), "grace9000");
     }
 
     #[test]
